@@ -317,7 +317,7 @@ class BatchTrainer:
             
             for idx, symbol in enumerate(symbols, 1):
                 current += 1
-                logger.info(f"[{current}/{total}] {symbol} ({timeframe})", end=' ')
+                logger.info(f"[{current}/{total}] {symbol:12s} ({timeframe:4s})", end=' ')
                 
                 success, best_loss, message = self.train_single(
                     symbol, timeframe, epochs, batch_size, learning_rate

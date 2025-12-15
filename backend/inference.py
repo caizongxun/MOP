@@ -5,7 +5,7 @@ Loads model architecture from models_architecture.json
 
 Usage:
     python backend/inference.py --symbol BTCUSDT --timeframe 1h
-    python backend/inference.py --symbol ETHUSDT --timeframe 15m --num-samples 10
+    python backend/inference.py --symbol ETHUSDT --timeframe 15m --num-predictions 10
 """
 
 import logging
@@ -46,6 +46,9 @@ class ModelInference:
         # Load model architecture
         self.architectures = self._load_architectures(architecture_file)
         logger.info(f"Loaded architectures for {len(self.architectures)} model groups")
+        
+        # Store scalers for denormalization
+        self.scalers = {}
     
     def _load_architectures(self, filename):
         """
@@ -58,27 +61,19 @@ class ModelInference:
             logger.warning(f"Architecture file not found: {filename}")
             return {}
     
-    def get_model_architecture(self, symbol, timeframe):
-        """
-        Get model architecture for symbol and timeframe
-        """
-        key = f"{symbol}_{timeframe}"
-        
-        if key not in self.architectures:
-            logger.error(f"No architecture found for {key}")
-            return None
-        
-        model_info = self.architectures[key][0]
-        return model_info['model_config']
-    
     def load_model(self, symbol, timeframe):
         """
-        Load trained model
+        Load trained model - handles both .pt and .pth extensions
         """
-        model_path = self.model_dir / f"{symbol}_{timeframe}_v1.pt"
-        
-        if not model_path.exists():
-            logger.error(f"Model file not found: {model_path}")
+        # Try both .pt and .pth extensions
+        for ext in ['.pt', '.pth']:
+            model_path = self.model_dir / f"{symbol}_{timeframe}_v1{ext}"
+            
+            if model_path.exists():
+                logger.info(f"Found model: {model_path.name}")
+                break
+        else:
+            logger.error(f"Model file not found for {symbol}_{timeframe}")
             return None
         
         try:
@@ -105,6 +100,8 @@ class ModelInference:
         
         except Exception as e:
             logger.error(f"Error loading model: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def predict(self, symbol, timeframe, num_predictions=1):
@@ -136,9 +133,19 @@ class ModelInference:
         logger.info(f"Total available features: {len(all_feature_cols)}")
         logger.info(f"Data shape: {data_with_indicators.shape}")
         
+        # Create scaler for this symbol
         scaler = MinMaxScaler()
         data_normalized = data_with_indicators.copy()
         data_normalized[all_feature_cols] = scaler.fit_transform(data_with_indicators[all_feature_cols])
+        
+        # Also create a scaler specifically for the 'close' price for denormalization
+        close_scaler = MinMaxScaler()
+        close_prices = data_with_indicators[['close']].values
+        close_scaler.fit(close_prices)
+        
+        # Store scalers
+        key = f"{symbol}_{timeframe}"
+        self.scalers[key] = (scaler, close_scaler)
         
         lookback = MODEL_CONFIG['lookback']
         
@@ -162,13 +169,11 @@ class ModelInference:
         with torch.no_grad():
             for i in range(num_predictions):
                 # Use the last available data for all predictions
-                # Last lookback samples end at index len(data_normalized)-1
                 start_idx = len(data_normalized) - lookback
                 end_idx = len(data_normalized)
                 
                 # Adjust if we need historical predictions
                 if i > 0:
-                    # For historical predictions, shift back
                     offset = i
                     if len(data_normalized) - lookback - offset < 0:
                         logger.warning(f"Not enough historical data for prediction {i+1}")
@@ -188,8 +193,11 @@ class ModelInference:
                 logger.info(f"  x shape: {x.shape}, x_tensor shape: {x_tensor.shape}")
                 
                 try:
-                    pred = model(x_tensor).cpu().numpy()[0, 0]
-                    predictions.append(float(pred))
+                    pred_normalized = model(x_tensor).cpu().numpy()[0, 0]
+                    
+                    # Denormalize the prediction
+                    pred_denorm = close_scaler.inverse_transform([[pred_normalized]])[0, 0]
+                    predictions.append(float(pred_denorm))
                     
                     # Timestamp is at the end_idx-1 position
                     timestamp_idx = end_idx - 1
@@ -198,8 +206,11 @@ class ModelInference:
                         timestamps.append(str(timestamp))
                         actual_price = float(data_with_indicators['close'].iloc[timestamp_idx])
                         actual_prices.append(actual_price)
-                        logger.info(f"  Predicted (normalized): {pred:.6f}")
-                        logger.info(f"  Actual price: {actual_price:.6f}")
+                        logger.info(f"  Predicted (normalized): {pred_normalized:.6f}")
+                        logger.info(f"  Predicted (denormalized): {pred_denorm:.2f}")
+                        logger.info(f"  Actual price: {actual_price:.2f}")
+                        logger.info(f"  Difference: {abs(actual_price - pred_denorm):.2f}")
+                        logger.info(f"  Error: {abs(actual_price - pred_denorm) / actual_price * 100:.2f}%")
                         logger.info(f"  Timestamp: {timestamp}")
                     else:
                         logger.warning(f"  Timestamp index {timestamp_idx} out of bounds")
@@ -231,7 +242,7 @@ class ModelInference:
             ],
             'summary': {
                 'total_predictions': len(predictions),
-                'avg_error': float(np.mean([
+                'avg_error_percent': float(np.mean([
                     abs(actual_prices[i] - predictions[i]) / actual_prices[i] * 100
                     for i in range(len(predictions))
                 ])),

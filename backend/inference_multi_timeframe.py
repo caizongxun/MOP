@@ -6,6 +6,11 @@ import numpy as np
 import argparse
 from datetime import datetime
 
+# Fix path for imports
+backend_path = os.path.dirname(os.path.abspath(__file__))
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager
 
@@ -96,7 +101,6 @@ class MultiTimeframePredictor:
             return None
         
         # Get actual future prices (if available)
-        # Note: This is for testing against already-occurred data
         actual = data_1h[-test_lookback:, 4]  # Close prices
         
         if len(actual) < len(predictions):

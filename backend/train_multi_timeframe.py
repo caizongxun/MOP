@@ -9,6 +9,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 import argparse
 
+# Fix path for imports
+backend_path = os.path.dirname(os.path.abspath(__file__))
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager
 
@@ -124,7 +129,6 @@ class MultiTimeframeTrainer:
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 patience_counter = 0
-                # Save best model
                 self._save_model()
             else:
                 patience_counter += 1

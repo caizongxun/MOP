@@ -196,7 +196,7 @@ class BatchTrainer:
             criterion = nn.MSELoss()
             optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.7, patience=10, verbose=False, min_lr=1e-6
+                optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6
             )
             
             best_val_loss = float('inf')

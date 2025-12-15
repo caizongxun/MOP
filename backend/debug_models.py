@@ -184,7 +184,7 @@ class ModelDebugger:
                 logger.info(f"    Output Size: {config['output_size']}")
                 logger.info(f"    Dropout: {config['dropout']}")
                 logger.info(f"    Lookback: {model_info['data_info']['lookback']}")
-                logger.info()
+                logger.info("-" * 40)
     
     def export_to_json(self, all_models, output_file='models_architecture.json'):
         """

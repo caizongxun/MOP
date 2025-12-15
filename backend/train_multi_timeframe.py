@@ -8,15 +8,20 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 import argparse
+from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
 
 # Add current backend dir to path
 backend_path = os.path.dirname(os.path.abspath(__file__))
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager
 from data.data_loader import CryptoDataLoader
+from config.model_config import MODEL_CONFIG
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,9 +49,11 @@ class MultiTimeframeTrainer:
         Calculate technical indicators for a dataframe
         """
         try:
-            return self.data_loader.calculate_indicators(df)
+            return self.data_loader.calculate_technical_indicators(df)
         except Exception as e:
             logger.error(f"Error calculating indicators: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def prepare_data(self, seq_len_1h=60):
@@ -71,21 +78,33 @@ class MultiTimeframeTrainer:
             # Calculate indicators
             logger.info(f'Calculating indicators for 1h...')
             df_1h_ind = self._calculate_indicators(df_1h)
-            if df_1h_ind is None:
+            if df_1h_ind is None or df_1h_ind.empty:
                 logger.error('Failed to calculate 1h indicators')
                 return None, None, None
             
             logger.info(f'Calculating indicators for 15m...')
             df_15m_ind = self._calculate_indicators(df_15m)
-            if df_15m_ind is None:
+            if df_15m_ind is None or df_15m_ind.empty:
                 logger.error('Failed to calculate 15m indicators')
                 return None, None, None
             
-            # Convert to numpy
-            data_1h = df_1h_ind.values.astype(np.float32)
-            data_15m = df_15m_ind.values.astype(np.float32)
+            logger.info(f'1h data shape: {df_1h_ind.shape}, 15m data shape: {df_15m_ind.shape}')
             
-            logger.info(f'1h data shape: {data_1h.shape}, 15m data shape: {data_15m.shape}')
+            # Normalize 1h
+            scaler_1h = MinMaxScaler()
+            feature_cols_1h = [col for col in df_1h_ind.columns if col != 'timestamp']
+            data_1h_normalized = df_1h_ind.copy()
+            data_1h_normalized[feature_cols_1h] = scaler_1h.fit_transform(df_1h_ind[feature_cols_1h])
+            data_1h = data_1h_normalized[feature_cols_1h].values.astype(np.float32)
+            
+            # Normalize 15m
+            scaler_15m = MinMaxScaler()
+            feature_cols_15m = [col for col in df_15m_ind.columns if col != 'timestamp']
+            data_15m_normalized = df_15m_ind.copy()
+            data_15m_normalized[feature_cols_15m] = scaler_15m.fit_transform(df_15m_ind[feature_cols_15m])
+            data_15m = data_15m_normalized[feature_cols_15m].values.astype(np.float32)
+            
+            logger.info(f'1h normalized data shape: {data_1h.shape}, 15m normalized data shape: {data_15m.shape}')
             
             # Create sequences
             X_1h, y_1h = self._create_sequences(data_1h, seq_len_1h)
@@ -115,9 +134,8 @@ class MultiTimeframeTrainer:
         X, y = [], []
         for i in range(len(data) - seq_len):
             X.append(data[i:i+seq_len])
-            # Use close price (usually column with index 'close' or similar)
-            # For now, use first column as target
-            y.append(data[i+seq_len, 0])  # Take first column of next candle
+            # Use first column (typically open or close) as target
+            y.append(data[i+seq_len, 0])
         return np.array(X), np.array(y)
     
     def train(self, epochs=100, batch_size=32):
@@ -193,7 +211,7 @@ def main():
     args = parser.parse_args()
     
     logger.info('='*80)
-    logger.info('Multi-Timeframe Training (1H + 15M Fusion with Indicators)')
+    logger.info('Multi-Timeframe Training (1H + 15M Fusion with Technical Indicators)')
     logger.info('='*80)
     logger.info(f'Symbols: {args.symbols}')
     logger.info(f'Epochs: {args.epochs}, Batch Size: {args.batch_size}')

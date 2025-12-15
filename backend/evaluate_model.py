@@ -106,8 +106,8 @@ class ModelEvaluator:
         
         # Load data
         data = self.data_manager.get_stored_data(symbol, timeframe)
-        if data is None or len(data) < 100:
-            logger.warning(f"Insufficient data for {symbol} ({timeframe})")
+        if data is None or len(data) < 30:  # Reduced from 100 to 30
+            logger.warning(f"Insufficient data for {symbol} ({timeframe}). Need at least 30 rows, got {len(data) if data is not None else 0}")
             return None
         
         logger.info(f"Loaded {len(data)} rows of data")
@@ -119,11 +119,17 @@ class ModelEvaluator:
             logger.warning(f"Failed to calculate indicators for {symbol}")
             return None
         
+        logger.info(f"Calculated indicators. Data shape: {data_with_indicators.shape}")
+        
         # Get feature columns (exclude OHLCV)
         feature_cols = [col for col in data_with_indicators.columns 
                        if col not in ['open', 'high', 'low', 'close', 'volume']]
         
         logger.info(f"Using {len(feature_cols)} features for prediction")
+        
+        if len(feature_cols) == 0:
+            logger.warning(f"No features available for {symbol}")
+            return None
         
         # Normalize features
         from sklearn.preprocessing import MinMaxScaler
@@ -132,7 +138,7 @@ class ModelEvaluator:
         data_normalized[feature_cols] = scaler.fit_transform(data_with_indicators[feature_cols])
         
         # Prepare sequences
-        lookback = MODEL_CONFIG['lookback']
+        lookback = min(MODEL_CONFIG['lookback'], len(data_normalized) - 2)  # At least 2 samples after lookback
         X = []
         y = []
         close_prices = data_with_indicators['close'].values
@@ -141,15 +147,24 @@ class ModelEvaluator:
             X.append(data_normalized[feature_cols].iloc[i:i+lookback].values)
             y.append(close_prices[i+lookback])
         
+        if len(X) == 0:
+            logger.warning(f"Not enough data to create sequences for {symbol}")
+            return None
+        
         X = np.array(X)
         y = np.array(y)
         
         logger.info(f"Prepared {len(X)} sequences with lookback={lookback}")
         
         # Split into train and test
-        split_idx = int(len(X) * (1 - test_split))
+        split_idx = max(1, int(len(X) * (1 - test_split)))  # At least 1 test sample
         X_test = X[split_idx:]
         y_test = y[split_idx:]
+        
+        if len(X_test) == 0:
+            logger.warning(f"No test samples available for {symbol}")
+            return None
+        
         test_timestamps = data_with_indicators.index[lookback+split_idx:]
         
         logger.info(f"Test set: {len(X_test)} samples (from {test_timestamps[0]} to {test_timestamps[-1]})")
@@ -180,9 +195,12 @@ class ModelEvaluator:
         mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
         
         # Calculate directional accuracy
-        actual_direction = np.diff(y_test) > 0
-        pred_direction = np.diff(y_pred) > 0
-        directional_accuracy = np.mean(actual_direction == pred_direction) * 100
+        if len(y_test) > 1:
+            actual_direction = np.diff(y_test) > 0
+            pred_direction = np.diff(y_pred) > 0
+            directional_accuracy = np.mean(actual_direction == pred_direction) * 100
+        else:
+            directional_accuracy = 0.0
         
         results = {
             'symbol': symbol,
@@ -199,7 +217,7 @@ class ModelEvaluator:
                 'Price_Range_Predicted': f"{np.min(y_pred):.2f} - {np.max(y_pred):.2f}",
             },
             'data': {
-                'timestamps': test_timestamps.tolist(),
+                'timestamps': [str(ts) for ts in test_timestamps],
                 'actual': y_test.tolist(),
                 'predicted': y_pred.tolist(),
             }

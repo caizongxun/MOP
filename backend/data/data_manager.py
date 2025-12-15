@@ -25,19 +25,19 @@ class DataManager:
     - Metadata tracking (last update, row count, etc.)
     """
     
-    # API限制：每次最多1000根，但可以循环多次
+    # API限制：每次最多1000根，但可以循環多次
     MAX_PER_REQUEST = 1000
     
     @staticmethod
-    def _find_data_directory(base_path='data/raw'):
+    def _find_data_directory(base_path='backend/data/raw'):
         """
         Try to find data directory in multiple locations
         """
         possible_paths = [
             Path(base_path),
             Path(os.getcwd()) / base_path,
+            Path(__file__).parent / 'raw',  # Current dir / raw
             Path(__file__).parent.parent.parent / base_path,
-            Path(__file__).parent / base_path,
         ]
         
         for path in possible_paths:
@@ -45,13 +45,13 @@ class DataManager:
                 logger.info(f"Found data directory at: {path.absolute()}")
                 return path
         
-        # If not found, create default
-        default_path = Path(base_path)
+        # If not found, create default at backend/data/raw
+        default_path = Path(__file__).parent / 'raw'
         default_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created data directory at: {default_path.absolute()}")
         return default_path
     
-    def __init__(self, data_dir='data/raw', timeframes=['15m', '1h']):
+    def __init__(self, data_dir='backend/data/raw', timeframes=['15m', '1h']):
         """
         Initialize data manager
         

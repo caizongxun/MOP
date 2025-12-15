@@ -5,11 +5,14 @@ import torch
 import numpy as np
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 # Fix path for imports
 backend_path = os.path.dirname(os.path.abspath(__file__))
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager

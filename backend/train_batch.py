@@ -317,19 +317,21 @@ class BatchTrainer:
             
             for idx, symbol in enumerate(symbols, 1):
                 current += 1
-                logger.info(f"[{current}/{total}] {symbol:12s} ({timeframe:4s})", end=' ')
+                log_msg = f"[{current}/{total}] {symbol:12s} ({timeframe:4s}) "
                 
                 success, best_loss, message = self.train_single(
                     symbol, timeframe, epochs, batch_size, learning_rate
                 )
                 
                 if success:
-                    logger.info(f"OK - {message}")
+                    log_msg += f"OK - {message}"
+                    logger.info(log_msg)
                     success_count += 1
                     self.results[timeframe][symbol]['status'] = 'Success'
                     self.results[timeframe][symbol]['best_loss'] = best_loss
                 else:
-                    logger.warning(f"FAIL - {message}")
+                    log_msg += f"FAIL - {message}"
+                    logger.warning(log_msg)
                     failed_count += 1
                     self.results[timeframe][symbol]['status'] = 'Failed'
                     self.results[timeframe][symbol]['error'] = message

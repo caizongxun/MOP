@@ -5,11 +5,17 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import json
 import os
+import sys
 from dotenv import load_dotenv
 import time
 
-from .data_loader import CryptoDataLoader
-from ..config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from backend.data.data_loader import CryptoDataLoader
+from backend.config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
 
 load_dotenv()
 logger = logging.getLogger(__name__)

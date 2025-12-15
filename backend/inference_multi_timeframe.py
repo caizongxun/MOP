@@ -6,6 +6,7 @@ import numpy as np
 import argparse
 from datetime import datetime
 from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
 
 # Fix path for imports
 backend_path = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager
+from data.data_loader import CryptoDataLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +31,7 @@ class MultiTimeframePredictor:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = MultiTimeframeFusion().to(self.device)
         self.dm = DataManager()
+        self.data_loader = CryptoDataLoader()
         self.model_dir = model_dir
         
         # Load model
@@ -41,92 +44,142 @@ class MultiTimeframePredictor:
         self.model.eval()
         logger.info(f'Model loaded from {model_path}')
     
+    def _calculate_indicators(self, df):
+        """Calculate technical indicators"""
+        try:
+            return self.data_loader.calculate_technical_indicators(df)
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+            return None
+    
     def predict(self, num_predictions=50):
         """Generate predictions using multi-timeframe fusion"""
         logger.info(f'Generating {num_predictions} predictions for {self.symbol}')
         
-        # Load latest data
-        data_1h = self.dm.load_data(self.symbol, '1h')
-        data_15m = self.dm.load_data(self.symbol, '15m')
+        try:
+            # Load latest data
+            df_1h = self.dm.get_stored_data(self.symbol, '1h')
+            df_15m = self.dm.get_stored_data(self.symbol, '15m')
+            
+            if df_1h is None or df_15m is None:
+                logger.error('Failed to load data')
+                return None
+            
+            # Calculate indicators
+            logger.info('Calculating indicators for 1h...')
+            df_1h_ind = self._calculate_indicators(df_1h)
+            if df_1h_ind is None or df_1h_ind.empty:
+                logger.error('Failed to calculate 1h indicators')
+                return None
+            
+            logger.info('Calculating indicators for 15m...')
+            df_15m_ind = self._calculate_indicators(df_15m)
+            if df_15m_ind is None or df_15m_ind.empty:
+                logger.error('Failed to calculate 15m indicators')
+                return None
+            
+            # Normalize 1h
+            scaler_1h = MinMaxScaler()
+            feature_cols_1h = [col for col in df_1h_ind.columns if col != 'timestamp']
+            data_1h_normalized = df_1h_ind.copy()
+            data_1h_normalized[feature_cols_1h] = scaler_1h.fit_transform(df_1h_ind[feature_cols_1h])
+            data_1h = data_1h_normalized[feature_cols_1h].values.astype(np.float32)
+            
+            # Normalize 15m
+            scaler_15m = MinMaxScaler()
+            feature_cols_15m = [col for col in df_15m_ind.columns if col != 'timestamp']
+            data_15m_normalized = df_15m_ind.copy()
+            data_15m_normalized[feature_cols_15m] = scaler_15m.fit_transform(df_15m_ind[feature_cols_15m])
+            data_15m = data_15m_normalized[feature_cols_15m].values.astype(np.float32)
+            
+            # Get last sequences
+            seq_len_1h = 60
+            seq_len_15m = 240
+            
+            x_1h = data_1h[-seq_len_1h:].copy()
+            x_15m = data_15m[-seq_len_15m:].copy()
+            
+            # Store actual prices for reference (from last close)
+            last_price_1h = df_1h_ind['close'].iloc[-1]
+            last_price_15m = df_15m_ind['close'].iloc[-1]
+            
+            predictions = []
+            
+            logger.info(f'Starting from 1h close: {last_price_1h:.2f}, 15m close: {last_price_15m:.2f}')
+            logger.info(f'Data shapes: 1h={x_1h.shape}, 15m={x_15m.shape}')
+            
+            with torch.no_grad():
+                for i in range(num_predictions):
+                    # Prepare batch
+                    x_1h_tensor = torch.FloatTensor(x_1h).unsqueeze(0).to(self.device)
+                    x_15m_tensor = torch.FloatTensor(x_15m).unsqueeze(0).to(self.device)
+                    
+                    # Predict (output is normalized)
+                    pred_normalized = self.model(x_1h_tensor, x_15m_tensor).item()
+                    predictions.append(pred_normalized)
+                    
+                    # Create dummy candle with predicted normalized value
+                    dummy_candle_1h = np.zeros(x_1h.shape[1])
+                    dummy_candle_1h[0] = pred_normalized  # Set first feature
+                    x_1h = np.vstack([x_1h[1:], dummy_candle_1h])
+                    
+                    # 15m gets 4 candles for each 1h
+                    for j in range(4):
+                        dummy_candle_15m = np.zeros(x_15m.shape[1])
+                        dummy_candle_15m[0] = pred_normalized
+                        x_15m = np.vstack([x_15m[1:], dummy_candle_15m])
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f'Prediction {i+1}/{num_predictions}: {pred_normalized:.6f}')
+            
+            logger.info(f'Generated {len(predictions)} predictions')
+            return predictions, last_price_1h, scaler_1h
         
-        if data_1h is None or data_15m is None:
-            logger.error('Failed to load data')
-            return None
-        
-        # Get last sequences
-        seq_len_1h = 60
-        seq_len_15m = 240
-        
-        x_1h = data_1h[-seq_len_1h:].copy()
-        x_15m = data_15m[-seq_len_15m:].copy()
-        
-        # Store actual prices for reference
-        last_price_1h = data_1h[-1, 4]  # Close price
-        last_price_15m = data_15m[-1, 4]
-        
-        predictions = []
-        actual_future = []
-        
-        logger.info(f'Starting from 1h price: {last_price_1h:.2f}, 15m price: {last_price_15m:.2f}')
-        
-        with torch.no_grad():
-            for i in range(num_predictions):
-                # Prepare batch
-                x_1h_tensor = torch.FloatTensor(x_1h).unsqueeze(0).to(self.device)
-                x_15m_tensor = torch.FloatTensor(x_15m).unsqueeze(0).to(self.device)
-                
-                # Predict
-                pred = self.model(x_1h_tensor, x_15m_tensor).item()
-                predictions.append(pred)
-                
-                # Update sequences (shift and append)
-                dummy_candle_1h = np.zeros(x_1h.shape[1])
-                dummy_candle_1h[4] = pred  # Set close price
-                x_1h = np.vstack([x_1h[1:], dummy_candle_1h])
-                
-                # 15m gets 4 candles for each 1h
-                for j in range(4):
-                    dummy_candle_15m = np.zeros(x_15m.shape[1])
-                    dummy_candle_15m[4] = pred
-                    x_15m = np.vstack([x_15m[1:], dummy_candle_15m])
-                
-                if (i + 1) % 10 == 0:
-                    logger.info(f'Prediction {i+1}/{num_predictions}: {pred:.2f}')
-        
-        return predictions
+        except Exception as e:
+            logger.error(f'Error in predict: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return None, None, None
     
-    def evaluate_predictions(self, predictions, test_lookback=50):
+    def evaluate_predictions(self, predictions, last_price, scaler, test_lookback=50):
         """Evaluate prediction accuracy against actual data"""
-        data_1h = self.dm.load_data(self.symbol, '1h')
+        try:
+            df_1h = self.dm.get_stored_data(self.symbol, '1h')
+            
+            if df_1h is None or len(df_1h) < test_lookback:
+                logger.warning('Insufficient data for evaluation')
+                return None
+            
+            # Get actual close prices
+            actual_prices = df_1h['close'].iloc[-test_lookback:].values
+            
+            if len(actual_prices) < len(predictions):
+                predictions = predictions[:len(actual_prices)]
+            
+            predictions = np.array(predictions[:len(actual_prices)])
+            
+            # Calculate metrics
+            mae = np.mean(np.abs(predictions - actual_prices))
+            rmse = np.sqrt(np.mean((predictions - actual_prices) ** 2))
+            mape = np.mean(np.abs((actual_prices - predictions) / actual_prices)) * 100
+            
+            metrics = {
+                'mae': mae,
+                'rmse': rmse,
+                'mape': mape,
+                'avg_actual': np.mean(actual_prices),
+                'avg_predicted': np.mean(predictions),
+                'actual_range': (np.min(actual_prices), np.max(actual_prices)),
+                'predicted_range': (np.min(predictions), np.max(predictions))
+            }
+            
+            return metrics
         
-        if data_1h is None or len(data_1h) < test_lookback:
-            logger.warning('Insufficient data for evaluation')
+        except Exception as e:
+            logger.error(f'Error in evaluate: {str(e)}')
+            import traceback
+            traceback.print_exc()
             return None
-        
-        # Get actual future prices (if available)
-        actual = data_1h[-test_lookback:, 4]  # Close prices
-        
-        if len(actual) < len(predictions):
-            predictions = predictions[:len(actual)]
-        
-        predictions = np.array(predictions[:len(actual)])
-        
-        # Calculate metrics
-        mae = np.mean(np.abs(predictions - actual))
-        rmse = np.sqrt(np.mean((predictions - actual) ** 2))
-        mape = np.mean(np.abs((actual - predictions) / actual)) * 100
-        
-        metrics = {
-            'mae': mae,
-            'rmse': rmse,
-            'mape': mape,
-            'avg_actual': np.mean(actual),
-            'avg_predicted': np.mean(predictions),
-            'actual_range': (np.min(actual), np.max(actual)),
-            'predicted_range': (np.min(predictions), np.max(predictions))
-        }
-        
-        return metrics
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-timeframe prediction')
@@ -141,27 +194,29 @@ def main():
     
     try:
         predictor = MultiTimeframePredictor(symbol=args.symbol, device=device)
-        predictions = predictor.predict(num_predictions=args.num_predictions)
+        result = predictor.predict(num_predictions=args.num_predictions)
         
-        if predictions:
+        if result[0] is not None:
+            predictions, last_price, scaler = result
             logger.info('\n' + '='*80)
             logger.info('PREDICTION RESULTS')
             logger.info('='*80)
             logger.info(f'Predictions: {len(predictions)}')
-            logger.info(f'Range: {np.min(predictions):.2f} - {np.max(predictions):.2f}')
-            logger.info(f'Mean: {np.mean(predictions):.2f}')
+            logger.info(f'Range: {np.min(predictions):.6f} - {np.max(predictions):.6f}')
+            logger.info(f'Mean: {np.mean(predictions):.6f}')
+            logger.info(f'Last actual price: {last_price:.2f}')
             
             if args.evaluate:
-                metrics = predictor.evaluate_predictions(predictions, test_lookback=50)
+                metrics = predictor.evaluate_predictions(predictions, last_price, scaler, test_lookback=50)
                 if metrics:
                     logger.info('\nEvaluation Metrics (vs recent actual data):')
-                    logger.info(f'MAE: ${metrics["mae"]:.2f}')
-                    logger.info(f'RMSE: ${metrics["rmse"]:.2f}')
+                    logger.info(f'MAE: {metrics["mae"]:.6f}')
+                    logger.info(f'RMSE: {metrics["rmse"]:.6f}')
                     logger.info(f'MAPE: {metrics["mape"]:.2f}%')
-                    logger.info(f'Avg Actual: ${metrics["avg_actual"]:.2f}')
-                    logger.info(f'Avg Predicted: ${metrics["avg_predicted"]:.2f}')
-                    logger.info(f'Actual Range: ${metrics["actual_range"][0]:.2f} - ${metrics["actual_range"][1]:.2f}')
-                    logger.info(f'Predicted Range: ${metrics["predicted_range"][0]:.2f} - ${metrics["predicted_range"][1]:.2f}')
+                    logger.info(f'Avg Actual: {metrics["avg_actual"]:.2f}')
+                    logger.info(f'Avg Predicted: {metrics["avg_predicted"]:.2f}')
+                    logger.info(f'Actual Range: {metrics["actual_range"][0]:.2f} - {metrics["actual_range"][1]:.2f}')
+                    logger.info(f'Predicted Range: {metrics["predicted_range"][0]:.2f} - {metrics["predicted_range"][1]:.2f}')
             
             logger.info('='*80)
     

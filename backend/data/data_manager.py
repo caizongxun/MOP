@@ -8,8 +8,8 @@ import os
 from dotenv import load_dotenv
 import time
 
-from data_loader import CryptoDataLoader
-from config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
+from .data_loader import CryptoDataLoader
+from ..config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
 
 load_dotenv()
 logger = logging.getLogger(__name__)

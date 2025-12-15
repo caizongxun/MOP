@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import json
 import os
 from dotenv import load_dotenv
+import time
 
 from backend.data.data_loader import CryptoDataLoader
 from config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
@@ -18,10 +19,14 @@ class DataManager:
     Manage cryptocurrency data collection and storage
     Features:
     - Incremental data fetching (avoids re-downloading)
+    - Multi-batch fetching (2000+, 3000+, 5000+ candles)
     - Local storage for all cryptocurrencies
     - Support for multiple timeframes (15m, 1h)
     - Metadata tracking (last update, row count, etc.)
     """
+    
+    # API限制：每次最多1000根，但可以循环多次
+    MAX_PER_REQUEST = 1000
     
     def __init__(self, data_dir='data/raw', timeframes=['15m', '1h']):
         """
@@ -72,26 +77,12 @@ class DataManager:
     def _get_file_path(self, symbol, timeframe):
         """
         Get file path for a cryptocurrency and timeframe
-        
-        Args:
-            symbol: Cryptocurrency symbol (e.g., 'BTCUSDT')
-            timeframe: Timeframe (e.g., '15m', '1h')
-        
-        Returns:
-            Path object
         """
         return self.data_dir / f"{symbol}_{timeframe}.csv"
     
     def get_stored_data(self, symbol, timeframe):
         """
         Load stored data for a symbol and timeframe
-        
-        Args:
-            symbol: Cryptocurrency symbol
-            timeframe: Timeframe
-        
-        Returns:
-            DataFrame or None if not found
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -110,15 +101,6 @@ class DataManager:
     def _append_new_data(self, symbol, timeframe, new_data, existing_data):
         """
         Append new data to existing data, avoiding duplicates
-        
-        Args:
-            symbol: Cryptocurrency symbol
-            timeframe: Timeframe
-            new_data: New DataFrame from API
-            existing_data: Existing DataFrame from storage
-        
-        Returns:
-            Combined DataFrame
         """
         if existing_data is None or existing_data.empty:
             return new_data
@@ -136,11 +118,6 @@ class DataManager:
     def save_data(self, symbol, timeframe, df):
         """
         Save data to CSV file
-        
-        Args:
-            symbol: Cryptocurrency symbol
-            timeframe: Timeframe
-            df: DataFrame to save
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -165,53 +142,100 @@ class DataManager:
     
     def fetch_and_store(self, symbol, timeframe='1h', limit=1000, append=True):
         """
-        Fetch data from API and store locally
-        Incremental: only fetches and appends new data
-        
-        Args:
-            symbol: Cryptocurrency symbol (e.g., 'BTCUSDT')
-            timeframe: Timeframe (default: '1h')
-            limit: Number of candles to fetch from API (max 1000)
-            append: If True, append to existing data; if False, replace
-        
-        Returns:
-            Combined DataFrame
+        Fetch data from API and store locally (single batch, max 1000 candles)
         """
         logger.info(f"Fetching data for {symbol} ({timeframe})...")
         
-        # Fetch from API
         new_data = self.data_loader.fetch_ohlcv(symbol, timeframe, limit)
         
         if new_data is None or new_data.empty:
             logger.warning(f"Failed to fetch data for {symbol} ({timeframe})")
-            # Return existing data if available
             return self.get_stored_data(symbol, timeframe)
         
-        # Get existing data
         if append:
             existing_data = self.get_stored_data(symbol, timeframe)
             combined_data = self._append_new_data(symbol, timeframe, new_data, existing_data)
         else:
             combined_data = new_data
         
-        # Save combined data
         self.save_data(symbol, timeframe, combined_data)
-        
         return combined_data
+    
+    def fetch_and_store_batch(self, symbol, timeframe='1h', total_limit=3000, batch_delay=1.0):
+        """
+        Fetch multiple batches to accumulate more candles
+        Makes multiple API calls to get more historical data
+        
+        Args:
+            symbol: Cryptocurrency symbol
+            timeframe: Timeframe (15m, 1h)
+            total_limit: Total candles to fetch (2000, 3000, 5000, etc.)
+            batch_delay: Delay between API calls (seconds) to avoid rate limit
+        
+        Returns:
+            Combined DataFrame with all accumulated data
+        """
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Batch fetching {symbol} ({timeframe})")
+        logger.info(f"Target: {total_limit} candles (batches of {self.MAX_PER_REQUEST})")
+        logger.info(f"{'='*60}")
+        
+        all_data = self.get_stored_data(symbol, timeframe)
+        
+        # Calculate how many batches needed
+        num_batches = (total_limit + self.MAX_PER_REQUEST - 1) // self.MAX_PER_REQUEST
+        
+        for batch_num in range(num_batches):
+            logger.info(f"\nBatch {batch_num + 1}/{num_batches}")
+            
+            try:
+                # Fetch this batch
+                batch_data = self.data_loader.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    limit=self.MAX_PER_REQUEST
+                )
+                
+                if batch_data is None or batch_data.empty:
+                    logger.warning(f"Batch {batch_num + 1} returned no data")
+                    break
+                
+                logger.info(f"Fetched {len(batch_data)} rows in batch {batch_num + 1}")
+                
+                # Append to accumulated data
+                if all_data is None or all_data.empty:
+                    all_data = batch_data
+                else:
+                    all_data = self._append_new_data(symbol, timeframe, batch_data, all_data)
+                
+                # Delay before next batch to avoid rate limiting
+                if batch_num < num_batches - 1:
+                    logger.info(f"Waiting {batch_delay}s before next batch...")
+                    time.sleep(batch_delay)
+            
+            except Exception as e:
+                logger.error(f"Error in batch {batch_num + 1}: {str(e)}")
+                break
+        
+        # Save final accumulated data
+        if all_data is not None and not all_data.empty:
+            self.save_data(symbol, timeframe, all_data)
+            logger.info(f"\nCompleted: {len(all_data)} total rows saved")
+            return all_data
+        else:
+            logger.warning(f"No data accumulated for {symbol} ({timeframe})")
+            return None
     
     def fetch_and_store_all(self, timeframes=None, limit=1000):
         """
-        Fetch and store data for all cryptocurrencies
-        
-        Args:
-            timeframes: List of timeframes (default: ['15m', '1h'])
-            limit: Number of candles to fetch per API call
+        Fetch and store data for all cryptocurrencies (single batch per coin)
         """
         if timeframes is None:
             timeframes = self.timeframes
         
         logger.info(f"Starting data collection for {len(CRYPTOCURRENCIES)} cryptocurrencies")
         logger.info(f"Timeframes: {timeframes}")
+        logger.info(f"Limit per coin: {limit} candles")
         
         results = {}
         
@@ -261,12 +285,91 @@ class DataManager:
         
         return results
     
+    def fetch_and_store_all_batch(self, timeframes=None, total_limit=3000, batch_delay=1.0):
+        """
+        Batch fetch for all cryptocurrencies to accumulate more candles
+        
+        Args:
+            timeframes: List of timeframes
+            total_limit: Total candles per coin per timeframe (2000, 3000, 5000, etc.)
+            batch_delay: Delay between batches (seconds)
+        """
+        if timeframes is None:
+            timeframes = self.timeframes
+        
+        logger.info(f"\n{'='*70}")
+        logger.info(f"BATCH DATA COLLECTION FOR ALL CRYPTOCURRENCIES")
+        logger.info(f"{'='*70}")
+        logger.info(f"Cryptocurrencies: {len(CRYPTOCURRENCIES)}")
+        logger.info(f"Timeframes: {timeframes}")
+        logger.info(f"Target per coin: {total_limit} candles")
+        logger.info(f"Batch size: {self.MAX_PER_REQUEST} candles per API call")
+        logger.info(f"API call delay: {batch_delay}s")
+        logger.info(f"{'='*70}")
+        
+        results = {}
+        total_batches = len(CRYPTOCURRENCIES) * len(timeframes)
+        current_batch = 0
+        
+        for symbol in CRYPTOCURRENCIES:
+            symbol_results = {}
+            logger.info(f"\n\nProcessing {symbol}...")
+            
+            for timeframe in timeframes:
+                current_batch += 1
+                logger.info(f"\n[{current_batch}/{total_batches}] {symbol} {timeframe}")
+                
+                try:
+                    df = self.fetch_and_store_batch(
+                        symbol,
+                        timeframe=timeframe,
+                        total_limit=total_limit,
+                        batch_delay=batch_delay
+                    )
+                    
+                    if df is not None and not df.empty:
+                        symbol_results[timeframe] = {
+                            'status': 'Success',
+                            'rows': len(df),
+                            'date_range': f"{df.index[0].date()} to {df.index[-1].date()}"
+                        }
+                    else:
+                        symbol_results[timeframe] = {
+                            'status': 'Failed',
+                            'error': 'No data returned'
+                        }
+                except Exception as e:
+                    symbol_results[timeframe] = {
+                        'status': 'Error',
+                        'error': str(e)
+                    }
+            
+            results[symbol] = symbol_results
+        
+        # Print final summary
+        logger.info(f"\n\n{'='*70}")
+        logger.info("BATCH DATA COLLECTION COMPLETED")
+        logger.info(f"{'='*70}")
+        
+        total_success = 0
+        for symbol, timeframe_results in sorted(results.items()):
+            logger.info(f"\n{symbol}:")
+            for timeframe, result in timeframe_results.items():
+                status = result['status']
+                if status == 'Success':
+                    logger.info(f"  {timeframe}: {status} ({result['rows']} rows) - {result['date_range']}")
+                    total_success += 1
+                else:
+                    error = result.get('error', 'Unknown error')
+                    logger.info(f"  {timeframe}: {status} - {error}")
+        
+        logger.info(f"\nTotal: {total_success}/{total_batches} successful")
+        
+        return results
+    
     def get_data_statistics(self):
         """
         Get statistics about stored data
-        
-        Returns:
-            Dictionary with data statistics
         """
         stats = {
             'total_files': 0,
@@ -275,7 +378,6 @@ class DataManager:
             'date_created': datetime.now().isoformat(),
         }
         
-        # Iterate through all CSV files
         for csv_file in self.data_dir.glob('*.csv'):
             if csv_file.name == 'metadata.json':
                 continue
@@ -325,12 +427,3 @@ class DataManager:
             for tf in sorted(timeframes.keys()):
                 info = timeframes[tf]
                 logger.info(f"  {tf}: {info['rows']:,} rows ({info['date_range']['start']} to {info['date_range']['end']})")
-    
-    def cleanup_old_files(self, days=30):
-        """
-        Remove CSV files older than specified days (optional)
-        
-        Args:
-            days: Number of days to keep (default: 30)
-        """
-        logger.warning(f"Cleanup function not implemented (would remove files older than {days} days)")

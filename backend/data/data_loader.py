@@ -17,7 +17,7 @@ class CryptoDataLoader:
     Supports:
     - Multiple timeframes (15m, 1h, etc.)
     - Extended historical data (up to 1000+ candles)
-    - Multiple features for enhanced prediction accuracy
+    - 35+ technical indicators with data validation
     - Multi-timeframe training for robust models
     """
     
@@ -29,28 +29,82 @@ class CryptoDataLoader:
         '1d': 1440
     }
     
-    # Technical indicators to calculate
-    FEATURES = [
-        'open', 'high', 'low', 'close', 'volume',
-        'sma_10', 'sma_20', 'sma_50',  # Simple Moving Averages
-        'ema_10', 'ema_20',              # Exponential Moving Averages
-        'rsi',                           # Relative Strength Index
-        'macd', 'macd_signal',           # MACD
-        'bb_upper', 'bb_middle', 'bb_lower',  # Bollinger Bands
-        'atr',                           # Average True Range
-        'momentum',                      # Price momentum
-    ]
+    # All available technical indicators
+    # Format: 'indicator_name': min_candles_required
+    INDICATORS_CONFIG = {
+        # Price & Volume (5)
+        'open': 1,
+        'high': 1,
+        'low': 1,
+        'close': 1,
+        'volume': 1,
+        
+        # Simple Moving Averages (5)
+        'sma_10': 10,
+        'sma_20': 20,
+        'sma_50': 50,
+        'sma_100': 100,
+        'sma_200': 200,
+        
+        # Exponential Moving Averages (5)
+        'ema_10': 10,
+        'ema_20': 20,
+        'ema_50': 50,
+        'ema_100': 100,
+        'ema_200': 200,
+        
+        # Momentum Indicators (8)
+        'rsi_14': 14,
+        'rsi_21': 21,
+        'macd': 26,
+        'macd_signal': 35,
+        'macd_histogram': 35,
+        'momentum': 5,
+        'roc_12': 12,
+        'stochastic_k': 14,
+        'stochastic_d': 17,
+        
+        # Volatility Indicators (6)
+        'bb_upper': 20,
+        'bb_middle': 20,
+        'bb_lower': 20,
+        'bb_width': 20,
+        'bb_percent_b': 20,
+        'atr_14': 14,
+        
+        # Trend Indicators (5)
+        'adx': 14,
+        'di_plus': 14,
+        'di_minus': 14,
+        'natr': 14,
+        'kc_upper': 20,
+        'kc_middle': 20,
+        'kc_lower': 20,
+        
+        # Volume Indicators (4)
+        'obv': 1,
+        'cmf': 20,
+        'vpt': 1,
+        'mfi': 14,
+        
+        # Other Indicators (3)
+        'price_change': 1,
+        'volume_change': 1,
+        'hl2': 1,
+    }
     
-    def __init__(self, lookback_period=60, use_binance_api=True):
+    def __init__(self, lookback_period=60, use_binance_api=True, min_candles=200):
         """
         Initialize data loader
         
         Args:
             lookback_period: Number of candles for lookback (default: 60)
             use_binance_api: Use Binance direct API or CCXT (default: True)
+            min_candles: Minimum candles needed for all indicators (default: 200)
         """
         self.lookback_period = lookback_period
         self.use_binance_api = use_binance_api
+        self.min_candles = min_candles
         
         # Initialize both methods
         self.exchange = ccxt.binance({
@@ -63,11 +117,11 @@ class CryptoDataLoader:
         
         # Scalers for each feature
         self.scalers = {}
+        self.available_features = []
     
     def fetch_ohlcv_binance_api(self, symbol, timeframe='15m', limit=1000):
         """
         Fetch OHLCV data directly from Binance REST API
-        More reliable for large historical data
         
         Args:
             symbol: Trading pair (e.g., 'BTCUSDT')
@@ -78,7 +132,6 @@ class CryptoDataLoader:
             DataFrame with OHLCV data
         """
         try:
-            # Binance API endpoint mapping
             timeframe_map = {
                 '15m': '15m',
                 '1h': '1h',
@@ -92,7 +145,7 @@ class CryptoDataLoader:
             params = {
                 'symbol': symbol,
                 'interval': interval,
-                'limit': min(limit, 1000)  # Binance max 1000 per request
+                'limit': min(limit, 1000)
             }
             
             response = requests.get(url, params=params, timeout=10)
@@ -107,13 +160,9 @@ class CryptoDataLoader:
                         'taker_buy_base', 'taker_buy_quote', 'ignore']
             )
             
-            # Convert timestamp to datetime
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            
-            # Keep only OHLCV columns
             df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
             
-            # Convert to numeric
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
@@ -134,19 +183,10 @@ class CryptoDataLoader:
     def fetch_ohlcv_ccxt(self, symbol, timeframe='15m', limit=1000):
         """
         Fetch OHLCV data using CCXT
-        
-        Args:
-            symbol: Trading pair (e.g., 'BTC/USDT')
-            timeframe: Candle timeframe
-            limit: Number of candles to fetch
-        
-        Returns:
-            DataFrame with OHLCV data
         """
         try:
-            # CCXT requires '/' in symbol
             if '/' not in symbol:
-                symbol = symbol[:-4] + '/' + symbol[-4:]  # e.g., BTCUSDT -> BTC/USDT
+                symbol = symbol[:-4] + '/' + symbol[-4:]
             
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(
@@ -166,14 +206,6 @@ class CryptoDataLoader:
     def fetch_ohlcv(self, symbol, timeframe='15m', limit=1000):
         """
         Fetch OHLCV data - tries Binance API first, falls back to CCXT
-        
-        Args:
-            symbol: Trading pair
-            timeframe: Candle timeframe (15m, 1h, 4h, 1d)
-            limit: Number of candles (default: 1000)
-        
-        Returns:
-            DataFrame with OHLCV data
         """
         if self.use_binance_api:
             return self.fetch_ohlcv_binance_api(symbol, timeframe, limit)
@@ -182,56 +214,126 @@ class CryptoDataLoader:
     
     def calculate_technical_indicators(self, df):
         """
-        Calculate technical indicators for enhanced feature set
-        Adds 15 technical indicators for better prediction accuracy
+        Calculate 35+ technical indicators
+        Automatically skips indicators that don't have enough data
         
         Args:
             df: DataFrame with OHLCV data
         
         Returns:
-            DataFrame with additional technical indicators
+            DataFrame with technical indicators, list of available features
         """
         df = df.copy()
+        self.available_features = ['open', 'high', 'low', 'close', 'volume']
         
-        # Simple Moving Averages
-        df['sma_10'] = df['close'].rolling(window=10).mean()
-        df['sma_20'] = df['close'].rolling(window=20).mean()
-        df['sma_50'] = df['close'].rolling(window=50).mean()
+        num_candles = len(df)
+        logger.info(f"Calculating indicators with {num_candles} candles")
         
-        # Exponential Moving Averages
-        df['ema_10'] = df['close'].ewm(span=10).mean()
-        df['ema_20'] = df['close'].ewm(span=20).mean()
-        
-        # Relative Strength Index (RSI)
-        df['rsi'] = self._calculate_rsi(df['close'])
-        
-        # MACD
-        macd_result = self._calculate_macd(df['close'])
-        df['macd'] = macd_result['macd']
-        df['macd_signal'] = macd_result['signal']
-        
-        # Bollinger Bands
-        bb_result = self._calculate_bollinger_bands(df['close'])
-        df['bb_upper'] = bb_result['upper']
-        df['bb_middle'] = bb_result['middle']
-        df['bb_lower'] = bb_result['lower']
-        
-        # Average True Range (ATR)
-        df['atr'] = self._calculate_atr(df)
-        
-        # Momentum
-        df['momentum'] = df['close'].diff(4)
-        
-        # Drop NaN values
-        df = df.dropna()
-        
-        return df
+        try:
+            # Moving Averages
+            for period in [10, 20, 50, 100, 200]:
+                if num_candles >= period:
+                    df[f'sma_{period}'] = df['close'].rolling(window=period).mean()
+                    df[f'ema_{period}'] = df['close'].ewm(span=period).mean()
+                    self.available_features.extend([f'sma_{period}', f'ema_{period}'])
+                else:
+                    logger.warning(f"Skipping SMA/EMA {period}: need {period}, have {num_candles}")
+            
+            # RSI
+            if num_candles >= 14:
+                df['rsi_14'] = self._calculate_rsi(df['close'], period=14)
+                self.available_features.append('rsi_14')
+            if num_candles >= 21:
+                df['rsi_21'] = self._calculate_rsi(df['close'], period=21)
+                self.available_features.append('rsi_21')
+            
+            # MACD
+            if num_candles >= 26:
+                macd_result = self._calculate_macd(df['close'])
+                df['macd'] = macd_result['macd']
+                df['macd_signal'] = macd_result['signal']
+                df['macd_histogram'] = macd_result['histogram']
+                self.available_features.extend(['macd', 'macd_signal', 'macd_histogram'])
+            
+            # Bollinger Bands
+            if num_candles >= 20:
+                bb_result = self._calculate_bollinger_bands(df['close'])
+                df['bb_upper'] = bb_result['upper']
+                df['bb_middle'] = bb_result['middle']
+                df['bb_lower'] = bb_result['lower']
+                df['bb_width'] = bb_result['upper'] - bb_result['lower']
+                df['bb_percent_b'] = (df['close'] - bb_result['lower']) / (bb_result['upper'] - bb_result['lower'])
+                self.available_features.extend(['bb_upper', 'bb_middle', 'bb_lower', 'bb_width', 'bb_percent_b'])
+            
+            # ATR
+            if num_candles >= 14:
+                df['atr_14'] = self._calculate_atr(df, period=14)
+                self.available_features.append('atr_14')
+            
+            # ADX (using DI+, DI-, ADX approximation)
+            if num_candles >= 14:
+                di_result = self._calculate_directional_indicators(df)
+                df['di_plus'] = di_result['di_plus']
+                df['di_minus'] = di_result['di_minus']
+                df['adx'] = di_result['adx']
+                self.available_features.extend(['di_plus', 'di_minus', 'adx'])
+            
+            # Keltner Channels
+            if num_candles >= 20:
+                kc_result = self._calculate_keltner_channels(df)
+                df['kc_upper'] = kc_result['upper']
+                df['kc_middle'] = kc_result['middle']
+                df['kc_lower'] = kc_result['lower']
+                self.available_features.extend(['kc_upper', 'kc_middle', 'kc_lower'])
+            
+            # Stochastic Oscillator
+            if num_candles >= 14:
+                stoch_result = self._calculate_stochastic(df['high'], df['low'], df['close'])
+                df['stochastic_k'] = stoch_result['k']
+                df['stochastic_d'] = stoch_result['d']
+                self.available_features.extend(['stochastic_k', 'stochastic_d'])
+            
+            # Volume Indicators
+            df['obv'] = self._calculate_obv(df['close'], df['volume'])
+            self.available_features.append('obv')
+            
+            if num_candles >= 20:
+                df['cmf'] = self._calculate_cmf(df, period=20)
+                df['mfi'] = self._calculate_mfi(df, period=14)
+                self.available_features.extend(['cmf', 'mfi'])
+            
+            df['vpt'] = self._calculate_vpt(df['close'], df['volume'])
+            self.available_features.append('vpt')
+            
+            # Rate of Change
+            if num_candles >= 12:
+                df['roc_12'] = self._calculate_roc(df['close'], period=12)
+                self.available_features.append('roc_12')
+            
+            # Other indicators
+            df['momentum'] = df['close'].diff(5)
+            df['price_change'] = df['close'].diff()
+            df['volume_change'] = df['volume'].diff()
+            df['hl2'] = (df['high'] + df['low']) / 2
+            df['natr'] = (self._calculate_atr(df, period=14) / df['close']) * 100
+            self.available_features.extend(['momentum', 'price_change', 'volume_change', 'hl2', 'natr'])
+            
+            # Remove duplicates and NaN
+            self.available_features = list(set(self.available_features))
+            df = df.dropna()
+            
+            logger.info(f"Successfully calculated {len(self.available_features)} features")
+            logger.info(f"Available features: {sorted(self.available_features)}")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}", exc_info=True)
+            return df.dropna()
     
     @staticmethod
     def _calculate_rsi(close, period=14):
-        """
-        Calculate Relative Strength Index
-        """
+        """RSI calculation"""
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -241,20 +343,17 @@ class CryptoDataLoader:
     
     @staticmethod
     def _calculate_macd(close, fast=12, slow=26, signal=9):
-        """
-        Calculate MACD
-        """
+        """MACD calculation"""
         ema_fast = close.ewm(span=fast).mean()
         ema_slow = close.ewm(span=slow).mean()
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal).mean()
-        return {'macd': macd, 'signal': signal_line}
+        histogram = macd - signal_line
+        return {'macd': macd, 'signal': signal_line, 'histogram': histogram}
     
     @staticmethod
     def _calculate_bollinger_bands(close, period=20, std_dev=2):
-        """
-        Calculate Bollinger Bands
-        """
+        """Bollinger Bands calculation"""
         middle = close.rolling(window=period).mean()
         std = close.rolling(window=period).std()
         upper = middle + (std * std_dev)
@@ -263,9 +362,7 @@ class CryptoDataLoader:
     
     @staticmethod
     def _calculate_atr(df, period=14):
-        """
-        Calculate Average True Range
-        """
+        """Average True Range calculation"""
         df = df.copy()
         df['tr1'] = df['high'] - df['low']
         df['tr2'] = abs(df['high'] - df['close'].shift())
@@ -274,20 +371,107 @@ class CryptoDataLoader:
         atr = df['tr'].rolling(window=period).mean()
         return atr
     
+    @staticmethod
+    def _calculate_directional_indicators(df, period=14):
+        """ADX and Directional Indicators calculation"""
+        df = df.copy()
+        
+        # Calculate True Range
+        df['tr1'] = df['high'] - df['low']
+        df['tr2'] = abs(df['high'] - df['close'].shift())
+        df['tr3'] = abs(df['low'] - df['close'].shift())
+        df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        
+        # Directional Movement
+        df['up'] = df['high'].diff()
+        df['down'] = -df['low'].diff()
+        
+        df['di_plus'] = np.where(df['up'] > df['down'], df['up'], 0)
+        df['di_minus'] = np.where(df['down'] > df['up'], df['down'], 0)
+        
+        # Smoothed values
+        di_plus_smooth = df['di_plus'].rolling(window=period).sum()
+        di_minus_smooth = df['di_minus'].rolling(window=period).sum()
+        tr_smooth = df['tr'].rolling(window=period).sum()
+        
+        # Directional Indicators
+        di_plus = (di_plus_smooth / tr_smooth) * 100
+        di_minus = (di_minus_smooth / tr_smooth) * 100
+        
+        # ADX (simplified)
+        di_sum = (di_plus + di_minus).replace(0, 1)
+        adx = abs(di_plus - di_minus) / di_sum * 100
+        adx = adx.rolling(window=period).mean()
+        
+        return {'di_plus': di_plus, 'di_minus': di_minus, 'adx': adx}
+    
+    @staticmethod
+    def _calculate_keltner_channels(df, period=20, atr_period=14):
+        """Keltner Channels calculation"""
+        atr = CryptoDataLoader._calculate_atr(df, atr_period)
+        middle = df['close'].rolling(window=period).mean()
+        upper = middle + (atr * 2)
+        lower = middle - (atr * 2)
+        return {'upper': upper, 'middle': middle, 'lower': lower}
+    
+    @staticmethod
+    def _calculate_stochastic(high, low, close, period=14, smooth_k=3, smooth_d=3):
+        """Stochastic Oscillator calculation"""
+        lowest_low = low.rolling(window=period).min()
+        highest_high = high.rolling(window=period).max()
+        
+        k = ((close - lowest_low) / (highest_high - lowest_low)) * 100
+        k_smooth = k.rolling(window=smooth_k).mean()
+        d_smooth = k_smooth.rolling(window=smooth_d).mean()
+        
+        return {'k': k_smooth, 'd': d_smooth}
+    
+    @staticmethod
+    def _calculate_obv(close, volume):
+        """On-Balance Volume calculation"""
+        obv = volume.copy()
+        obv[close.diff() < 0] *= -1
+        return obv.cumsum()
+    
+    @staticmethod
+    def _calculate_cmf(df, period=20):
+        """Chaikin Money Flow calculation"""
+        mfv = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low']) * df['volume']
+        cmf = mfv.rolling(window=period).sum() / df['volume'].rolling(window=period).sum()
+        return cmf
+    
+    @staticmethod
+    def _calculate_mfi(df, period=14):
+        """Money Flow Index calculation"""
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        pmf = tp * df['volume']
+        pmf[tp < tp.shift()] = -pmf
+        
+        positive_mf = pmf.copy()
+        positive_mf[pmf < 0] = 0
+        negative_mf = pmf.copy()
+        negative_mf[pmf > 0] = 0
+        
+        pmf_ratio = positive_mf.rolling(window=period).sum() / negative_mf.rolling(window=period).sum().abs()
+        mfi = 100 - (100 / (1 + pmf_ratio))
+        return mfi
+    
+    @staticmethod
+    def _calculate_vpt(close, volume):
+        """Volume Price Trend calculation"""
+        return (volume * close.pct_change()).cumsum()
+    
+    @staticmethod
+    def _calculate_roc(close, period=12):
+        """Rate of Change calculation"""
+        return ((close - close.shift(period)) / close.shift(period)) * 100
+    
     def normalize_features(self, df, features_to_use=None):
         """
-        Normalize all features independently
-        Each feature gets its own MinMax scaler
-        
-        Args:
-            df: DataFrame with features
-            features_to_use: List of features to normalize
-        
-        Returns:
-            Normalized array
+        Normalize features independently
         """
         if features_to_use is None:
-            features_to_use = [col for col in df.columns if col in self.FEATURES]
+            features_to_use = self.available_features
         
         df_normalized = pd.DataFrame(index=df.index)
         
@@ -299,39 +483,21 @@ class CryptoDataLoader:
                 scaled = self.scalers[feature].fit_transform(df[[feature]])
                 df_normalized[feature] = scaled.flatten()
         
-        return df_normalized.values
+        return df_normalized.values, features_to_use
     
     def create_sequences(self, data, seq_length, prediction_horizon=1):
         """
         Create sequences for time series prediction
-        
-        Args:
-            data: Normalized data (num_samples, num_features)
-            seq_length: Sequence length (lookback period)
-            prediction_horizon: Steps ahead to predict (default: 1)
-        
-        Returns:
-            X, y arrays
         """
         X, y = [], []
         for i in range(len(data) - seq_length - prediction_horizon + 1):
             X.append(data[i:i+seq_length])
-            # Predict the close price at prediction_horizon steps ahead (close is feature index 3)
             y.append(data[i+seq_length+prediction_horizon-1, 3])
         return np.array(X), np.array(y)
     
     def fetch_multi_timeframe_data(self, symbol, timeframes=['15m', '1h'], limit=1000):
         """
         Fetch data for multiple timeframes
-        Creates unified training dataset from multiple timeframes
-        
-        Args:
-            symbol: Trading pair (e.g., 'BTCUSDT')
-            timeframes: List of timeframes (default: ['15m', '1h'])
-            limit: Number of candles per timeframe (default: 1000)
-        
-        Returns:
-            Dictionary with data for each timeframe
         """
         data = {}
         for tf in timeframes:

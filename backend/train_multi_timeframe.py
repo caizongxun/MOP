@@ -16,6 +16,7 @@ if backend_path not in sys.path:
 
 from model_multi_timeframe import MultiTimeframeFusion
 from data.data_manager import DataManager
+from data.data_loader import CryptoDataLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,30 +32,60 @@ class MultiTimeframeTrainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         self.criterion = nn.MSELoss()
         self.dm = DataManager()
+        self.data_loader = CryptoDataLoader()
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
         
         logger.info(f'Using device: {self.device}')
         logger.info(f'Model: MultiTimeframeFusion')
     
+    def _calculate_indicators(self, df):
+        """
+        Calculate technical indicators for a dataframe
+        """
+        try:
+            return self.data_loader.calculate_indicators(df)
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+            return None
+    
     def prepare_data(self, seq_len_1h=60):
-        """Prepare 1h and 15m data"""
+        """Prepare 1h and 15m data with technical indicators"""
         logger.info(f'Loading {self.symbol} data for 1h and 15m...')
         
         try:
-            # Load 1h data
-            data_1h = self.dm.load_data(self.symbol, '1h')
-            if data_1h is None or len(data_1h) < seq_len_1h:
+            # Load raw 1h data
+            df_1h = self.dm.get_stored_data(self.symbol, '1h')
+            if df_1h is None or len(df_1h) < seq_len_1h:
                 logger.error(f'Insufficient 1h data for {self.symbol}')
                 return None, None, None
             
-            # Load 15m data
-            data_15m = self.dm.load_data(self.symbol, '15m')
-            if data_15m is None or len(data_15m) < seq_len_1h * 4:
+            # Load raw 15m data
+            df_15m = self.dm.get_stored_data(self.symbol, '15m')
+            if df_15m is None or len(df_15m) < seq_len_1h * 4:
                 logger.error(f'Insufficient 15m data for {self.symbol}')
                 return None, None, None
             
-            logger.info(f'Loaded {len(data_1h)} rows for 1h, {len(data_15m)} rows for 15m')
+            logger.info(f'Loaded {len(df_1h)} rows for 1h, {len(df_15m)} rows for 15m')
+            
+            # Calculate indicators
+            logger.info(f'Calculating indicators for 1h...')
+            df_1h_ind = self._calculate_indicators(df_1h)
+            if df_1h_ind is None:
+                logger.error('Failed to calculate 1h indicators')
+                return None, None, None
+            
+            logger.info(f'Calculating indicators for 15m...')
+            df_15m_ind = self._calculate_indicators(df_15m)
+            if df_15m_ind is None:
+                logger.error('Failed to calculate 15m indicators')
+                return None, None, None
+            
+            # Convert to numpy
+            data_1h = df_1h_ind.values.astype(np.float32)
+            data_15m = df_15m_ind.values.astype(np.float32)
+            
+            logger.info(f'1h data shape: {data_1h.shape}, 15m data shape: {data_15m.shape}')
             
             # Create sequences
             X_1h, y_1h = self._create_sequences(data_1h, seq_len_1h)
@@ -84,7 +115,9 @@ class MultiTimeframeTrainer:
         X, y = [], []
         for i in range(len(data) - seq_len):
             X.append(data[i:i+seq_len])
-            y.append(data[i+seq_len, 4])  # Take close price (column 4)
+            # Use close price (usually column with index 'close' or similar)
+            # For now, use first column as target
+            y.append(data[i+seq_len, 0])  # Take first column of next candle
         return np.array(X), np.array(y)
     
     def train(self, epochs=100, batch_size=32):
@@ -160,7 +193,7 @@ def main():
     args = parser.parse_args()
     
     logger.info('='*80)
-    logger.info('Multi-Timeframe Training (1H + 15M Fusion)')
+    logger.info('Multi-Timeframe Training (1H + 15M Fusion with Indicators)')
     logger.info('='*80)
     logger.info(f'Symbols: {args.symbols}')
     logger.info(f'Epochs: {args.epochs}, Batch Size: {args.batch_size}')

@@ -6,6 +6,10 @@ Usage:
     python backend/quick_eval.py
     python backend/quick_eval.py --symbol ETHUSDT --timeframe 1h
     python backend/quick_eval.py --all-symbols
+
+Run from project root directory:
+    cd C:\Users\zong\Desktop\MOP
+    python backend/quick_eval.py
 """
 
 import logging
@@ -13,6 +17,9 @@ import sys
 import json
 from pathlib import Path
 from argparse import ArgumentParser
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.evaluate_model import ModelEvaluator
 from backend.visualize_predictions import PredictionVisualizer

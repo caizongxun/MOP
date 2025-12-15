@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 import argparse
 
-# Fix path for imports
+# Add current backend dir to path
 backend_path = os.path.dirname(os.path.abspath(__file__))
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)

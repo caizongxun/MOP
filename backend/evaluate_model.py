@@ -106,7 +106,7 @@ class ModelEvaluator:
         
         # Load data
         data = self.data_manager.get_stored_data(symbol, timeframe)
-        if data is None or len(data) < 30:  # Reduced from 100 to 30
+        if data is None or len(data) < 30:
             logger.warning(f"Insufficient data for {symbol} ({timeframe}). Need at least 30 rows, got {len(data) if data is not None else 0}")
             return None
         
@@ -121,11 +121,12 @@ class ModelEvaluator:
         
         logger.info(f"Calculated indicators. Data shape: {data_with_indicators.shape}")
         
-        # Get feature columns (exclude OHLCV)
+        # Get feature columns (exclude OHLCV and target)
         feature_cols = [col for col in data_with_indicators.columns 
                        if col not in ['open', 'high', 'low', 'close', 'volume']]
         
         logger.info(f"Using {len(feature_cols)} features for prediction")
+        logger.info(f"Feature columns: {feature_cols}")
         
         if len(feature_cols) == 0:
             logger.warning(f"No features available for {symbol}")
@@ -138,7 +139,7 @@ class ModelEvaluator:
         data_normalized[feature_cols] = scaler.fit_transform(data_with_indicators[feature_cols])
         
         # Prepare sequences
-        lookback = min(MODEL_CONFIG['lookback'], len(data_normalized) - 2)  # At least 2 samples after lookback
+        lookback = min(MODEL_CONFIG['lookback'], len(data_normalized) - 2)
         X = []
         y = []
         close_prices = data_with_indicators['close'].values
@@ -151,13 +152,14 @@ class ModelEvaluator:
             logger.warning(f"Not enough data to create sequences for {symbol}")
             return None
         
-        X = np.array(X)
+        X = np.array(X)  # Shape: (num_samples, lookback, num_features)
         y = np.array(y)
         
         logger.info(f"Prepared {len(X)} sequences with lookback={lookback}")
+        logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
         
         # Split into train and test
-        split_idx = max(1, int(len(X) * (1 - test_split)))  # At least 1 test sample
+        split_idx = max(1, int(len(X) * (1 - test_split)))
         X_test = X[split_idx:]
         y_test = y[split_idx:]
         
@@ -180,12 +182,21 @@ class ModelEvaluator:
         
         with torch.no_grad():
             for i, x in enumerate(X_test):
-                x_tensor = torch.FloatTensor(x).unsqueeze(0).to(self.device)
-                pred = model(x_tensor).cpu().numpy()[0, 0]
-                y_pred.append(pred)
-                
-                if (i + 1) % max(1, len(X_test) // 5) == 0:
-                    logger.info(f"  Predicted {i+1}/{len(X_test)} samples")
+                try:
+                    # x shape: (lookback, num_features)
+                    # Convert to tensor and add batch dimension
+                    x_tensor = torch.FloatTensor(x).unsqueeze(0).to(self.device)  # Shape: (1, lookback, num_features)
+                    logger.debug(f"Input tensor shape: {x_tensor.shape}")
+                    
+                    pred = model(x_tensor).cpu().numpy()[0, 0]
+                    y_pred.append(pred)
+                    
+                    if (i + 1) % max(1, len(X_test) // 5) == 0:
+                        logger.info(f"  Predicted {i+1}/{len(X_test)} samples")
+                except Exception as e:
+                    logger.error(f"Error predicting sample {i}: {str(e)}")
+                    logger.error(f"x shape: {x.shape}, x_tensor shape: {x_tensor.shape}")
+                    raise
         
         y_pred = np.array(y_pred)
         

@@ -28,6 +28,29 @@ class DataManager:
     # API限制：每次最多1000根，但可以循环多次
     MAX_PER_REQUEST = 1000
     
+    @staticmethod
+    def _find_data_directory(base_path='data/raw'):
+        """
+        Try to find data directory in multiple locations
+        """
+        possible_paths = [
+            Path(base_path),
+            Path(os.getcwd()) / base_path,
+            Path(__file__).parent.parent.parent / base_path,
+            Path(__file__).parent / base_path,
+        ]
+        
+        for path in possible_paths:
+            if path.exists():
+                logger.info(f"Found data directory at: {path.absolute()}")
+                return path
+        
+        # If not found, create default
+        default_path = Path(base_path)
+        default_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created data directory at: {default_path.absolute()}")
+        return default_path
+    
     def __init__(self, data_dir='data/raw', timeframes=['15m', '1h']):
         """
         Initialize data manager
@@ -36,8 +59,8 @@ class DataManager:
             data_dir: Directory to store raw data
             timeframes: List of timeframes to manage
         """
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Auto-detect data directory
+        self.data_dir = self._find_data_directory(data_dir)
         
         self.timeframes = timeframes
         self.data_loader = CryptoDataLoader(
@@ -86,17 +109,35 @@ class DataManager:
         """
         file_path = self._get_file_path(symbol, timeframe)
         
+        logger.debug(f"Looking for data file: {file_path}")
+        
         if not file_path.exists():
-            logger.debug(f"No stored data for {symbol} ({timeframe})")
+            logger.warning(f"No stored data for {symbol} ({timeframe}) at {file_path}")
+            # List available files for debugging
+            logger.debug(f"Available files in {self.data_dir}:")
+            if self.data_dir.exists():
+                for f in self.data_dir.glob("*.csv"):
+                    logger.debug(f"  - {f.name}")
             return None
         
         try:
+            # Try reading with timestamp index
             df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
             logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe}) from {file_path}")
             return df
         except Exception as e:
             logger.error(f"Error loading data for {symbol} ({timeframe}): {str(e)}")
-            return None
+            # Try reading without index
+            try:
+                df = pd.read_csv(file_path)
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df = df.set_index('timestamp')
+                logger.info(f"Loaded {len(df)} rows (with conversion) for {symbol} ({timeframe})")
+                return df
+            except Exception as e2:
+                logger.error(f"Failed to load data even with conversion: {str(e2)}")
+                return None
     
     def _append_new_data(self, symbol, timeframe, new_data, existing_data):
         """
@@ -375,6 +416,7 @@ class DataManager:
             'total_files': 0,
             'total_rows': 0,
             'symbols': {},
+            'data_dir': str(self.data_dir.absolute()),
             'date_created': datetime.now().isoformat(),
         }
         
@@ -417,6 +459,7 @@ class DataManager:
         logger.info(f"\n{'='*60}")
         logger.info("Data Storage Statistics")
         logger.info(f"{'='*60}")
+        logger.info(f"Data Directory: {stats['data_dir']}")
         logger.info(f"Total files: {stats['total_files']}")
         logger.info(f"Total rows: {stats['total_rows']:,}")
         logger.info(f"\nData by Symbol:")

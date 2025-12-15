@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 import time
 
-from backend.data.data_loader import CryptoDataLoader
+from data_loader import CryptoDataLoader
 from config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
 
 load_dotenv()
@@ -103,9 +103,34 @@ class DataManager:
         """
         return self.data_dir / f"{symbol}_{timeframe}.csv"
     
+    def load_data(self, symbol, timeframe):
+        """
+        Load stored data for a symbol and timeframe as numpy array
+        Returns numpy array for compatibility with model training
+        """
+        file_path = self._get_file_path(symbol, timeframe)
+        
+        if not file_path.exists():
+            logger.warning(f"No stored data for {symbol} ({timeframe}) at {file_path}")
+            return None
+        
+        try:
+            df = pd.read_csv(file_path)
+            # Convert to numpy array (skip timestamp column if present)
+            if 'timestamp' in df.columns:
+                data = df.drop('timestamp', axis=1).values.astype(np.float32)
+            else:
+                data = df.values.astype(np.float32)
+            
+            logger.info(f"Loaded {len(data)} rows for {symbol} ({timeframe})")
+            return data
+        except Exception as e:
+            logger.error(f"Error loading data for {symbol} ({timeframe}): {str(e)}")
+            return None
+    
     def get_stored_data(self, symbol, timeframe):
         """
-        Load stored data for a symbol and timeframe
+        Load stored data for a symbol and timeframe (returns DataFrame)
         """
         file_path = self._get_file_path(symbol, timeframe)
         

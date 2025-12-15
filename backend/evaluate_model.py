@@ -1,13 +1,18 @@
 import logging
+import sys
+from pathlib import Path
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pandas as pd
 import numpy as np
 import torch
-from pathlib import Path
 from datetime import datetime
 import json
 
 from backend.data.data_manager import DataManager
-from backend.models.lstm_model import LSTMModel
+from backend.models.lstm_model import CryptoLSTM
 from backend.data.data_loader import CryptoDataLoader
 from config.model_config import MODEL_CONFIG
 
@@ -64,11 +69,11 @@ class ModelEvaluator:
             state = torch.load(model_path, map_location=self.device)
             
             # Create model with same config
-            model = LSTMModel(
-                input_size=state['input_size'],
+            model = CryptoLSTM(
+                input_size=state['model_config']['input_size'],
                 hidden_size=MODEL_CONFIG['hidden_size'],
                 num_layers=MODEL_CONFIG['num_layers'],
-                output_size=1,
+                output_size=state['model_config']['output_size'],
                 dropout=MODEL_CONFIG['dropout']
             ).to(self.device)
             

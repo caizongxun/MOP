@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""
+r"""
 Quick evaluation script - One command to evaluate and visualize model
 
 Usage:
@@ -7,9 +7,7 @@ Usage:
     python backend/quick_eval.py --symbol ETHUSDT --timeframe 1h
     python backend/quick_eval.py --all-symbols
 
-Run from project root directory:
-    cd C:\Users\zong\Desktop\MOP
-    python backend/quick_eval.py
+Run from project root directory
 """
 
 import logging

@@ -1,12 +1,21 @@
 #!/usr/bin/env python
 r"""
-Batch Training Script for Multiple Cryptocurrencies
+Batch Training Script for 1h + 15m Timeframes
 
-Trains 20+ crypto pairs simultaneously with progress tracking.
+Train 20+ cryptocurrencies across multiple timeframes simultaneously.
 
 Usage:
-    python backend/train_batch.py --symbols BTCUSDT ETHUSDT BNBUSDT --timeframe 1h --epochs 100
-    python backend/train_batch.py --all --timeframe 1h  # Train all 20+ pairs
+    # Train all 20+ pairs in 1h
+    python backend/train_batch.py --all --timeframe 1h
+    
+    # Train all 20+ pairs in 15m
+    python backend/train_batch.py --all --timeframe 15m
+    
+    # Train both 1h and 15m (one after another)
+    python backend/train_batch.py --all --timeframe 1h 15m
+    
+    # Custom symbols
+    python backend/train_batch.py --symbols BTCUSDT ETHUSDT --timeframe 1h --epochs 100
 """
 
 import torch
@@ -35,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ImprovedCryptoGRU(nn.Module):
-    """GRU-based model"""
+    """GRU-based model with attention mechanism"""
     def __init__(self, input_size, hidden_size=128, num_layers=2, dropout=0.3, output_size=1):
         super(ImprovedCryptoGRU, self).__init__()
         
@@ -112,18 +121,19 @@ class BatchTrainer:
         
         self.data_manager = DataManager()
         self.data_loader = CryptoDataLoader()
-        self.results = defaultdict(dict)
+        self.results = defaultdict(lambda: defaultdict(dict))
     
     def train_single(self, symbol, timeframe='1h', epochs=100, batch_size=32, learning_rate=0.001):
         """
-        Train single cryptocurrency
+        Train single cryptocurrency on specific timeframe
         Returns: success (bool), best_loss (float), message (str)
         """
         try:
             # Load data
             data = self.data_manager.get_stored_data(symbol, timeframe)
             if data is None or len(data) < 100:
-                return False, None, f"Insufficient data ({len(data) if data is not None else 0} rows)"
+                rows = len(data) if data is not None else 0
+                return False, None, f"Insufficient data ({rows} rows)"
             
             # Calculate indicators
             data_with_indicators = self.data_loader.calculate_technical_indicators(data)
@@ -145,6 +155,9 @@ class BatchTrainer:
                 X_list.append(data_normalized[feature_cols].iloc[i:i+lookback].values)
                 y_list.append(data_with_indicators['close'].iloc[i+lookback])
             
+            if len(X_list) == 0:
+                return False, None, "No sequences created"
+            
             X = np.array(X_list)
             y = np.array(y_list)
             
@@ -160,6 +173,10 @@ class BatchTrainer:
             dataset = TensorDataset(X_tensor, y_tensor)
             val_size = int(len(dataset) * 0.1)
             train_size = len(dataset) - val_size
+            
+            if train_size < 1:
+                return False, None, "Dataset too small after split"
+            
             train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
             
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -184,6 +201,7 @@ class BatchTrainer:
             
             best_val_loss = float('inf')
             patience_counter = 0
+            best_epoch = 0
             
             for epoch in range(epochs):
                 # Train
@@ -223,6 +241,7 @@ class BatchTrainer:
                 # Early stopping
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
+                    best_epoch = epoch
                     patience_counter = 0
                     
                     # Save best
@@ -270,112 +289,104 @@ class BatchTrainer:
                 'val_loss': val_loss,
             }, final_path)
             
-            return True, best_val_loss, f"Best loss: {best_val_loss:.6f}"
+            return True, best_val_loss, f"Loss={best_val_loss:.6f} (epoch {best_epoch})"
             
         except Exception as e:
             return False, None, str(e)
     
-    def train_batch(self, symbols, timeframe='1h', epochs=100, batch_size=32, learning_rate=0.001):
+    def train_batch(self, symbols, timeframes, epochs=100, batch_size=32, learning_rate=0.001):
         """
-        Train multiple cryptocurrencies
+        Train multiple cryptocurrencies across multiple timeframes
         """
-        logger.info(f"\n{'='*70}")
-        logger.info(f"Batch Training: {len(symbols)} cryptocurrencies")
-        logger.info(f"Timeframe: {timeframe}")
-        logger.info(f"Epochs: {epochs}, Batch Size: {batch_size}, LR: {learning_rate}")
-        logger.info(f"{'='*70}\n")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Batch Training Configuration")
+        logger.info(f"{'='*80}")
+        logger.info(f"Cryptocurrencies: {len(symbols)}")
+        logger.info(f"Timeframes: {timeframes}")
+        logger.info(f"Epochs: {epochs} | Batch Size: {batch_size} | LR: {learning_rate}")
+        logger.info(f"Total models to train: {len(symbols) * len(timeframes)}")
+        logger.info(f"{'='*80}\n")
         
         success_count = 0
         failed_count = 0
+        total = len(symbols) * len(timeframes)
+        current = 0
         
-        for idx, symbol in enumerate(symbols, 1):
-            logger.info(f"[{idx}/{len(symbols)}] Training {symbol}...")
+        for timeframe in timeframes:
+            logger.info(f"\n[TIMEFRAME: {timeframe}]\n")
             
-            success, best_loss, message = self.train_single(
-                symbol, timeframe, epochs, batch_size, learning_rate
-            )
-            
-            if success:
-                logger.info(f"  [OK] {message}")
-                success_count += 1
-                self.results[symbol]['status'] = 'Success'
-                self.results[symbol]['best_loss'] = best_loss
-            else:
-                logger.warning(f"  [FAIL] {message}")
-                failed_count += 1
-                self.results[symbol]['status'] = 'Failed'
-                self.results[symbol]['error'] = message
+            for idx, symbol in enumerate(symbols, 1):
+                current += 1
+                logger.info(f"[{current}/{total}] {symbol} ({timeframe})", end=' ')
+                
+                success, best_loss, message = self.train_single(
+                    symbol, timeframe, epochs, batch_size, learning_rate
+                )
+                
+                if success:
+                    logger.info(f"OK - {message}")
+                    success_count += 1
+                    self.results[timeframe][symbol]['status'] = 'Success'
+                    self.results[timeframe][symbol]['best_loss'] = best_loss
+                else:
+                    logger.warning(f"FAIL - {message}")
+                    failed_count += 1
+                    self.results[timeframe][symbol]['status'] = 'Failed'
+                    self.results[timeframe][symbol]['error'] = message
         
         # Summary
-        logger.info(f"\n{'='*70}")
+        logger.info(f"\n{'='*80}")
         logger.info(f"TRAINING SUMMARY")
-        logger.info(f"{'='*70}")
-        logger.info(f"Success: {success_count}/{len(symbols)}")
-        logger.info(f"Failed: {failed_count}/{len(symbols)}\n")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total: {total} | Success: {success_count} | Failed: {failed_count}\n")
         
-        for symbol in symbols:
-            status = self.results[symbol]['status']
-            if status == 'Success':
-                loss = self.results[symbol]['best_loss']
-                logger.info(f"  {symbol}: OK (loss={loss:.6f})")
-            else:
-                error = self.results[symbol].get('error', 'Unknown error')
-                logger.info(f"  {symbol}: FAILED ({error})")
+        for timeframe in timeframes:
+            logger.info(f"[{timeframe}]")
+            for symbol in symbols:
+                result = self.results[timeframe][symbol]
+                if result['status'] == 'Success':
+                    loss = result['best_loss']
+                    logger.info(f"  {symbol:12s} OK   (loss={loss:.6f})")
+                else:
+                    error = result.get('error', 'Unknown error')
+                    logger.info(f"  {symbol:12s} FAIL ({error[:40]})")
         
         logger.info(f"\nModels saved to: backend/models/weights/")
-        logger.info(f"{'='*70}")
+        logger.info(f"{'='*80}")
 
 def get_default_symbols():
-    """
-    20+ default cryptocurrency symbols
-    """
+    """20+ default cryptocurrency symbols"""
     return [
-        'BTCUSDT',   # Bitcoin
-        'ETHUSDT',   # Ethereum
-        'BNBUSDT',   # Binance Coin
-        'ADAUSDT',   # Cardano
-        'DOGEUSDT',  # Dogecoin
-        'XRPUSDT',   # Ripple
-        'MATICUSDT', # Polygon
-        'LTCUSDT',   # Litecoin
-        'UNIUSDT',   # Uniswap
-        'LINKUSDT',  # Chainlink
-        'SUSHIUSDT', # SushiSwap
-        'AVAXUSDT',  # Avalanche
-        'SOLusdt',   # Solana
-        'FTMUSDT',   # Fantom
-        'ATOMUSDT',  # Cosmos
-        'NEARUSDT',  # NEAR Protocol
-        'APTUSDT',   # Aptos
-        'ARBITUSDT', # Arbitrum
-        'OPTIMUSDT', # Optimism
-        'MKRUSDT',   # Maker
+        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT',
+        'XRPUSDT', 'MATICUSDT', 'LTCUSDT', 'UNIUSDT', 'LINKUSDT',
+        'SUSHIUSDT', 'AVAXUSDT', 'SOLUSDT', 'FTMUSDT', 'ATOMUSDT',
+        'NEARUSDT', 'APTUSDT', 'ARBITUSDT', 'OPTIMUSDT', 'MKRUSDT',
     ]
 
 def main():
     parser = ArgumentParser(description='Batch train crypto models')
-    parser.add_argument('--symbols', nargs='+', help='Symbols to train (e.g., BTCUSDT ETHUSDT)')
+    parser.add_argument('--symbols', nargs='+', help='Symbols (e.g., BTCUSDT ETHUSDT)')
     parser.add_argument('--all', action='store_true', help='Train all 20+ default symbols')
-    parser.add_argument('--timeframe', default='1h', help='Timeframe (default: 1h)')
+    parser.add_argument('--timeframe', nargs='+', default=['1h'], help='Timeframes (e.g., 1h 15m)')
     parser.add_argument('--epochs', type=int, default=100, help='Epochs (default: 100)')
     parser.add_argument('--batch-size', type=int, default=32, help='Batch size (default: 32)')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate (default: 0.001)')
     
     args = parser.parse_args()
     
-    # Determine symbols to train
+    # Determine symbols
     if args.all:
         symbols = get_default_symbols()
     elif args.symbols:
         symbols = args.symbols
     else:
-        symbols = ['BTCUSDT', 'ETHUSDT']  # Default
+        symbols = ['BTCUSDT', 'ETHUSDT']
     
     # Train
     trainer = BatchTrainer()
     trainer.train_batch(
         symbols,
-        timeframe=args.timeframe,
+        args.timeframe,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr

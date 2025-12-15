@@ -3,16 +3,6 @@ from pathlib import Path
 from backend.data.data_manager import DataManager
 from config.model_config import CRYPTOCURRENCIES, DATA_CONFIG
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/data_fetcher.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
 if __name__ == "__main__":
     """
     Standalone data fetching script
@@ -28,8 +18,19 @@ if __name__ == "__main__":
     - Auto-creates metadata.json for tracking
     """
     
-    # Create logs directory
+    # Create logs directory FIRST
     Path('logs').mkdir(exist_ok=True)
+    
+    # Now setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('logs/data_fetcher.log'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
     
     logger.info(f"Starting data collection for {len(CRYPTOCURRENCIES)} cryptocurrencies")
     logger.info(f"Data directory: data/raw/")

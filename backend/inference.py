@@ -134,6 +134,7 @@ class ModelInference:
         all_feature_cols = [col for col in data_with_indicators.columns]
         
         logger.info(f"Total available features: {len(all_feature_cols)}")
+        logger.info(f"Data shape: {data_with_indicators.shape}")
         
         scaler = MinMaxScaler()
         data_normalized = data_with_indicators.copy()
@@ -152,36 +153,51 @@ class ModelInference:
         logger.info(f"\nGenerating {num_predictions} predictions...")
         predictions = []
         timestamps = []
+        actual_prices = []
         
         with torch.no_grad():
             for i in range(num_predictions):
-                idx = len(data_normalized) - lookback - (num_predictions - 1 - i)
+                # Start from the end and work backwards
+                # Last prediction uses data from [-lookback:]
+                # Second-to-last uses data from [-lookback-1:-1], etc.
+                end_idx = len(data_normalized) - (num_predictions - 1 - i)
+                start_idx = end_idx - lookback
                 
-                if idx < 0:
+                if start_idx < 0:
                     logger.warning(f"Not enough historical data for prediction {i+1}")
                     continue
                 
-                x = data_normalized[all_feature_cols].iloc[idx:idx+lookback].values
+                logger.info(f"  Prediction {i+1}: using data from index {start_idx} to {end_idx}")
+                
+                x = data_normalized[all_feature_cols].iloc[start_idx:end_idx].values
                 x_tensor = torch.FloatTensor(x).unsqueeze(0).to(self.device)
+                
+                logger.info(f"    x shape: {x.shape}, x_tensor shape: {x_tensor.shape}")
                 
                 try:
                     pred = model(x_tensor).cpu().numpy()[0, 0]
                     predictions.append(float(pred))
                     
-                    timestamp = data_with_indicators.index[idx + lookback]
-                    timestamps.append(str(timestamp))
-                    
-                    logger.info(f"  Prediction {i+1}: {pred:.6f} (timestamp: {timestamp})")
+                    # Timestamp is at the end_idx position
+                    if end_idx < len(data_with_indicators.index):
+                        timestamp = data_with_indicators.index[end_idx]
+                        timestamps.append(str(timestamp))
+                        actual_price = float(data_with_indicators['close'].iloc[end_idx])
+                        actual_prices.append(actual_price)
+                        logger.info(f"    Prediction: {pred:.6f}, Actual: {actual_price:.6f}, Timestamp: {timestamp}")
+                    else:
+                        logger.warning(f"    Timestamp index {end_idx} out of bounds")
                 
                 except Exception as e:
                     logger.error(f"Error on prediction {i+1}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
         
         if not predictions:
             logger.error("No successful predictions")
             return None
         
-        actual_prices = data_with_indicators['close'].iloc[-num_predictions:].values
-        
+        # Build results only with successful predictions
         results = {
             'symbol': symbol,
             'timeframe': timeframe,
@@ -189,9 +205,9 @@ class ModelInference:
                 {
                     'timestamp': timestamps[i],
                     'predicted_price': predictions[i],
-                    'actual_price': float(actual_prices[i]),
-                    'difference': float(actual_prices[i] - predictions[i]),
-                    'error_percent': float((abs(actual_prices[i] - predictions[i]) / actual_prices[i]) * 100)
+                    'actual_price': actual_prices[i],
+                    'difference': actual_prices[i] - predictions[i],
+                    'error_percent': (abs(actual_prices[i] - predictions[i]) / actual_prices[i]) * 100
                 }
                 for i in range(len(predictions))
             ],
@@ -221,8 +237,12 @@ def main():
     result = inference.predict(args.symbol, args.timeframe, args.num_predictions)
     
     if result:
-        logger.info("\nPrediction Results:")
-        logger.info(json.dumps(result, indent=2))
+        logger.info("\n" + "="*70)
+        logger.info("PREDICTION RESULTS")
+        logger.info("="*70)
+        logger.info(json.dumps(result, indent=2, default=str))
+    else:
+        logger.error("Prediction failed")
 
 
 if __name__ == "__main__":

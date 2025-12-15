@@ -1,17 +1,32 @@
+#!/usr/bin/env python
+r"""
+Visualization script - Plot actual vs predicted prices
+
+Usage:
+    python backend/visualize_predictions.py --symbol BTCUSDT --timeframe 1h --num-predictions 50
+    python backend/visualize_predictions.py --symbol ETHUSDT --timeframe 15m --num-predictions 100
+"""
+
 import logging
+import sys
 import json
-import pandas as pd
-import numpy as np
 from pathlib import Path
+from argparse import ArgumentParser
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import torch
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from sklearn.preprocessing import MinMaxScaler
 from datetime import datetime
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    print("Warning: matplotlib not installed. Install with: pip install matplotlib")
+from backend.models.lstm_model import CryptoLSTM
+from backend.data.data_manager import DataManager
+from backend.data.data_loader import CryptoDataLoader
+from config.model_config import MODEL_CONFIG
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,254 +35,222 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class PredictionVisualizer:
-    """
-    Visualize model predictions vs actual prices
-    Generate comparison charts and statistics
-    """
+    def __init__(self, device='cpu'):
+        self.device = device
+        self.model_dir = Path('backend/models/weights')
+        self.data_manager = DataManager()
+        self.data_loader = CryptoDataLoader()
     
-    def __init__(self):
-        """
-        Initialize visualizer
-        """
-        if not HAS_MATPLOTLIB:
-            logger.warning("matplotlib not available. Install with: pip install matplotlib")
-    
-    def plot_predictions(self, evaluation_result, symbol, timeframe='1h', figsize=(16, 8), save_path=None):
-        """
-        Plot actual vs predicted prices
+    def load_model(self, symbol, timeframe):
+        """Load trained model - handles both .pt and .pth extensions"""
+        for ext in ['.pt', '.pth']:
+            model_path = self.model_dir / f"{symbol}_{timeframe}_v1{ext}"
+            if model_path.exists():
+                logger.info(f"Found model: {model_path.name}")
+                break
+        else:
+            logger.error(f"Model file not found for {symbol}_{timeframe}")
+            return None
         
-        Args:
-            evaluation_result: Result dictionary from ModelEvaluator
-            symbol: Cryptocurrency symbol
-            timeframe: Timeframe
-            figsize: Figure size (width, height)
-            save_path: Path to save the figure (default: None, display only)
-        """
-        if not HAS_MATPLOTLIB:
-            logger.error("matplotlib not installed")
+        try:
+            state = torch.load(model_path, map_location=self.device)
+            config = state['model_config']
+            
+            model = CryptoLSTM(
+                input_size=config['input_size'],
+                hidden_size=MODEL_CONFIG['hidden_size'],
+                num_layers=MODEL_CONFIG['num_layers'],
+                output_size=config['output_size'],
+                dropout=MODEL_CONFIG['dropout']
+            ).to(self.device)
+            
+            model.load_state_dict(state['model_state_dict'])
+            model.eval()
+            
+            logger.info(f"Loaded model: {symbol} ({timeframe})")
+            return model
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}")
+            return None
+    
+    def generate_predictions(self, symbol, timeframe, num_predictions=50):
+        """Generate predictions for visualization"""
+        logger.info(f"\nGenerating predictions for {symbol} ({timeframe})...")
+        
+        data = self.data_manager.get_stored_data(symbol, timeframe)
+        if data is None or len(data) < 30:
+            logger.error(f"Insufficient data for {symbol}")
+            return None
+        
+        data_with_indicators = self.data_loader.calculate_technical_indicators(data)
+        if data_with_indicators is None or data_with_indicators.empty:
+            logger.error(f"Failed to calculate indicators")
+            return None
+        
+        all_feature_cols = [col for col in data_with_indicators.columns]
+        
+        scaler = MinMaxScaler()
+        data_normalized = data_with_indicators.copy()
+        data_normalized[all_feature_cols] = scaler.fit_transform(data_with_indicators[all_feature_cols])
+        
+        close_scaler = MinMaxScaler()
+        close_prices = data_with_indicators[['close']].values
+        close_scaler.fit(close_prices)
+        
+        lookback = MODEL_CONFIG['lookback']
+        max_predictions = len(data_normalized) - lookback
+        actual_num_predictions = min(num_predictions, max_predictions)
+        
+        logger.info(f"Data points: {len(data_normalized)}, Max predictions: {max_predictions}")
+        logger.info(f"Generating {actual_num_predictions} predictions...")
+        
+        model = self.load_model(symbol, timeframe)
+        if model is None:
+            return None
+        
+        predictions = []
+        actual_prices = []
+        timestamps = []
+        
+        with torch.no_grad():
+            for i in range(actual_num_predictions):
+                offset = actual_num_predictions - 1 - i
+                end_idx = len(data_normalized) - offset
+                start_idx = end_idx - lookback
+                
+                if start_idx < 0:
+                    continue
+                
+                x = data_normalized[all_feature_cols].iloc[start_idx:end_idx].values
+                x_tensor = torch.FloatTensor(x).unsqueeze(0).to(self.device)
+                
+                try:
+                    pred_normalized = model(x_tensor).cpu().numpy()[0, 0]
+                    pred_denorm = close_scaler.inverse_transform([[pred_normalized]])[0, 0]
+                    
+                    predictions.append(float(pred_denorm))
+                    
+                    timestamp_idx = end_idx - 1
+                    if timestamp_idx < len(data_with_indicators):
+                        timestamp = data_with_indicators.index[timestamp_idx]
+                        timestamps.append(timestamp)
+                        actual_price = float(data_with_indicators['close'].iloc[timestamp_idx])
+                        actual_prices.append(actual_price)
+                
+                except Exception as e:
+                    logger.error(f"Error on prediction {i+1}: {str(e)}")
+                    continue
+        
+        if not predictions:
+            logger.error("No successful predictions")
+            return None
+        
+        results = {
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'timestamps': timestamps,
+            'actual_prices': actual_prices,
+            'predicted_prices': predictions,
+            'statistics': {
+                'num_predictions': len(predictions),
+                'avg_actual': np.mean(actual_prices),
+                'avg_predicted': np.mean(predictions),
+                'rmse': np.sqrt(np.mean([(a - p)**2 for a, p in zip(actual_prices, predictions)])),
+                'mae': np.mean([abs(a - p) for a, p in zip(actual_prices, predictions)])
+            }
+        }
+        
+        return results
+    
+    def plot_predictions(self, results, output_file=None):
+        """Plot actual vs predicted prices"""
+        if not results:
+            logger.error("No results to plot")
             return
         
-        # Extract data
-        timestamps = pd.to_datetime(evaluation_result['data']['timestamps'])
-        actual = np.array(evaluation_result['data']['actual'])
-        predicted = np.array(evaluation_result['data']['predicted'])
-        metrics = evaluation_result['metrics']
+        symbol = results['symbol']
+        timeframe = results['timeframe']
+        timestamps = results['timestamps']
+        actual_prices = results['actual_prices']
+        predicted_prices = results['predicted_prices']
+        stats = results['statistics']
         
-        # Create figure with subplots
-        fig, axes = plt.subplots(2, 1, figsize=figsize)
-        fig.suptitle(f'{symbol} ({timeframe}) - Model Evaluation', fontsize=16, fontweight='bold')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
         
-        # Plot 1: Actual vs Predicted
-        ax1 = axes[0]
-        ax1.plot(timestamps, actual, label='Actual Price', linewidth=2, color='#1f77b4', marker='o', markersize=3, alpha=0.8)
-        ax1.plot(timestamps, predicted, label='Predicted Price', linewidth=2, color='#ff7f0e', marker='s', markersize=3, alpha=0.8)
-        ax1.set_ylabel('Price (USDT)', fontsize=12, fontweight='bold')
-        ax1.set_title(f'Actual vs Predicted Prices (Test Set: {len(actual)} samples)', fontsize=13, fontweight='bold')
-        ax1.legend(loc='best', fontsize=11)
+        ax1.plot(timestamps, actual_prices, label='Actual Price', linewidth=2, color='#00a6fb', marker='o', markersize=3)
+        ax1.plot(timestamps, predicted_prices, label='Predicted Price', linewidth=2, color='#ff006e', marker='s', markersize=3, alpha=0.8)
+        ax1.set_title(f'{symbol} ({timeframe}) - Actual vs Predicted Prices', fontsize=16, fontweight='bold')
+        ax1.set_xlabel('Timestamp', fontsize=12)
+        ax1.set_ylabel('Price (USD)', fontsize=12)
+        ax1.legend(fontsize=12, loc='best')
         ax1.grid(True, alpha=0.3)
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
-        ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
-        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
         
-        # Plot 2: Error and Directional Accuracy
-        ax2 = axes[1]
-        error = np.abs(actual - predicted)
-        percentage_error = np.abs((actual - predicted) / actual) * 100
-        
-        ax2.bar(range(len(error)), error, alpha=0.7, color='#d62728', label='Absolute Error')
-        ax2_twin = ax2.twinx()
-        ax2_twin.plot(range(len(percentage_error)), percentage_error, color='#2ca02c', linewidth=2, marker='o', markersize=3, label='Percentage Error (%)')
-        
-        ax2.set_xlabel('Sample Index', fontsize=12, fontweight='bold')
-        ax2.set_ylabel('Absolute Error (USDT)', fontsize=12, fontweight='bold', color='#d62728')
-        ax2_twin.set_ylabel('Percentage Error (%)', fontsize=12, fontweight='bold', color='#2ca02c')
-        ax2.set_title('Prediction Errors', fontsize=13, fontweight='bold')
+        errors = [a - p for a, p in zip(actual_prices, predicted_prices)]
+        colors = ['green' if e >= 0 else 'red' for e in errors]
+        ax2.bar(range(len(errors)), errors, color=colors, alpha=0.7, label='Residuals (Actual - Predicted)')
+        ax2.axhline(y=0, color='black', linestyle='-', linewidth=1)
+        ax2.set_title('Prediction Errors (Residuals)', fontsize=16, fontweight='bold')
+        ax2.set_xlabel('Prediction Index', fontsize=12)
+        ax2.set_ylabel('Error (USD)', fontsize=12)
+        ax2.legend(fontsize=12, loc='best')
         ax2.grid(True, alpha=0.3, axis='y')
-        ax2.tick_params(axis='y', labelcolor='#d62728')
-        ax2_twin.tick_params(axis='y', labelcolor='#2ca02c')
         
-        # Add metrics text box
-        metrics_text = f"""METRICS:
-MAE: {metrics['MAE']:.6f} USDT
-RMSE: {metrics['RMSE']:.6f} USDT
-MAPE: {metrics['MAPE']:.4f}%
-Dir. Accuracy: {metrics['Directional_Accuracy']:.2f}%
-
-PRICE STATS:
-Actual Mean: {metrics['Mean_Actual_Price']:.2f} USDT
-Pred Mean: {metrics['Mean_Predicted_Price']:.2f} USDT
-Actual Range: {metrics['Price_Range_Actual']}
-Pred Range: {metrics['Price_Range_Predicted']}"""
+        stats_text = f"""Statistics:
+RMSE: ${stats['rmse']:.2f}
+MAE: ${stats['mae']:.2f}
+Avg Actual: ${stats['avg_actual']:.2f}
+Avg Predicted: ${stats['avg_predicted']:.2f}
+Num Predictions: {stats['num_predictions']}"""
         
-        fig.text(0.02, 0.02, metrics_text, fontsize=10, family='monospace',
+        fig.text(0.02, 0.02, stats_text, fontsize=11, family='monospace', 
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
-        plt.tight_layout(rect=[0, 0.08, 1, 0.96])
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
         
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            logger.info(f"Chart saved to {save_path}")
-        else:
-            plt.show()
+        if output_file is None:
+            output_file = f"prediction_plot_{symbol}_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         
-        plt.close()
+        plt.savefig(output_file, dpi=100, bbox_inches='tight')
+        logger.info(f"\nPlot saved to: {output_file}")
+        
+        plt.show()
     
-    def create_comparison_report(self, evaluation_result, symbol, timeframe='1h', save_path='evaluation_report.txt'):
-        """
-        Create a text report of evaluation results
+    def visualize(self, symbol, timeframe, num_predictions=50, output_file=None):
+        """Generate and visualize predictions"""
+        logger.info(f"\nVisualizing predictions for {symbol} ({timeframe})")
+        logger.info(f"{'='*70}")
         
-        Args:
-            evaluation_result: Result dictionary from ModelEvaluator
-            symbol: Cryptocurrency symbol
-            timeframe: Timeframe
-            save_path: Path to save report
-        """
-        actual = np.array(evaluation_result['data']['actual'])
-        predicted = np.array(evaluation_result['data']['predicted'])
-        metrics = evaluation_result['metrics']
+        results = self.generate_predictions(symbol, timeframe, num_predictions)
         
-        report = f"""
-{'='*70}
-MODEL EVALUATION REPORT
-{'='*70}
-
-Symbol: {symbol}
-Timeframe: {timeframe}
-Test Samples: {evaluation_result['test_samples']}
-
-{'='*70}
-PREDICTION METRICS
-{'='*70}
-
-MAE (Mean Absolute Error): {metrics['MAE']:.8f} USDT
-RMSE (Root Mean Squared Error): {metrics['RMSE']:.8f} USDT
-MAPE (Mean Absolute Percentage Error): {metrics['MAPE']:.6f}%
-Directional Accuracy: {metrics['Directional_Accuracy']:.4f}%
-
-Interpretation:
-- MAPE < 1%: Excellent prediction
-- MAPE < 5%: Very good prediction
-- MAPE < 10%: Good prediction
-- MAPE >= 10%: Poor prediction
-
-{'='*70}
-PRICE STATISTICS
-{'='*70}
-
-Actual Prices:
-  Mean: {metrics['Mean_Actual_Price']:.2f} USDT
-  Min: {np.min(actual):.2f} USDT
-  Max: {np.max(actual):.2f} USDT
-  Std Dev: {np.std(actual):.2f} USDT
-  Range: {metrics['Price_Range_Actual']}
-
-Predicted Prices:
-  Mean: {metrics['Mean_Predicted_Price']:.2f} USDT
-  Min: {np.min(predicted):.2f} USDT
-  Max: {np.max(predicted):.2f} USDT
-  Std Dev: {np.std(predicted):.2f} USDT
-  Range: {metrics['Price_Range_Predicted']}
-
-Mean Difference: {abs(metrics['Mean_Actual_Price'] - metrics['Mean_Predicted_Price']):.2f} USDT
-
-{'='*70}
-ERROR ANALYSIS
-{'='*70}
-
-Absolute Error:
-  Mean: {np.mean(np.abs(actual - predicted)):.6f} USDT
-  Min: {np.min(np.abs(actual - predicted)):.6f} USDT
-  Max: {np.max(np.abs(actual - predicted)):.6f} USDT
-  Std Dev: {np.std(np.abs(actual - predicted)):.6f} USDT
-
-Percentage Error:
-  Mean: {np.mean(np.abs((actual - predicted) / actual) * 100):.6f}%
-  Min: {np.min(np.abs((actual - predicted) / actual) * 100):.6f}%
-  Max: {np.max(np.abs((actual - predicted) / actual) * 100):.6f}%
-  Std Dev: {np.std(np.abs((actual - predicted) / actual) * 100):.6f}%
-
-{'='*70}
-DIRECTIONAL ACCURACY
-{'='*70}
-
-Accuracy: {metrics['Directional_Accuracy']:.2f}%
-
-This metric shows how often the model correctly predicts
-whether the price will go up or down.
-
-{'='*70}
-CONCLUSION
-{'='*70}
-
-"""
-        
-        # Add conclusion based on MAPE
-        mape = metrics['MAPE']
-        if mape < 1:
-            report += "Model Performance: EXCELLENT - MAPE < 1%\n"
-            report += "The model provides highly accurate price predictions.\n"
-        elif mape < 5:
-            report += "Model Performance: VERY GOOD - MAPE < 5%\n"
-            report += "The model provides strong price predictions.\n"
-        elif mape < 10:
-            report += "Model Performance: GOOD - MAPE < 10%\n"
-            report += "The model provides reasonable price predictions.\n"
+        if results:
+            stats = results['statistics']
+            logger.info(f"\nStatistics:")
+            logger.info(f"  Predictions: {stats['num_predictions']}")
+            logger.info(f"  RMSE: ${stats['rmse']:.2f}")
+            logger.info(f"  MAE: ${stats['mae']:.2f}")
+            logger.info(f"  Avg Actual Price: ${stats['avg_actual']:.2f}")
+            logger.info(f"  Avg Predicted Price: ${stats['avg_predicted']:.2f}")
+            logger.info(f"  Difference: ${abs(stats['avg_actual'] - stats['avg_predicted']):.2f}")
+            
+            self.plot_predictions(results, output_file)
         else:
-            report += "Model Performance: NEEDS IMPROVEMENT - MAPE >= 10%\n"
-            report += "Consider improving the model with more data or tuning.\n"
-        
-        report += f"\n{'='*70}\n"
-        report += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        report += f"{'='*70}\n"
-        
-        # Save report
-        with open(save_path, 'w', encoding='utf-8') as f:
-            f.write(report)
-        
-        logger.info(f"Report saved to {save_path}")
-        print(report)
-        
-        return report
+            logger.error("Failed to generate predictions")
+
+
+def main():
+    parser = ArgumentParser(description='Visualize predictions vs actual prices')
+    parser.add_argument('--symbol', default='BTCUSDT', help='Symbol (default: BTCUSDT)')
+    parser.add_argument('--timeframe', default='1h', help='Timeframe (default: 1h)')
+    parser.add_argument('--num-predictions', type=int, default=50, help='Number of predictions (default: 50)')
+    parser.add_argument('--output', help='Output file path')
+    
+    args = parser.parse_args()
+    
+    visualizer = PredictionVisualizer()
+    visualizer.visualize(args.symbol, args.timeframe, args.num_predictions, args.output)
 
 
 if __name__ == "__main__":
-    """
-    Visualize evaluation results
-    """
-    Path('logs').mkdir(exist_ok=True)
-    
-    # Load evaluation results
-    result_file = 'BTCUSDT_1h_evaluation.json'
-    
-    if not Path(result_file).exists():
-        logger.error(f"Evaluation result file not found: {result_file}")
-        logger.info("Please run backend/evaluate_model.py first")
-        exit(1)
-    
-    with open(result_file, 'r') as f:
-        evaluation_result = json.load(f)
-    
-    symbol = evaluation_result['symbol']
-    timeframe = evaluation_result['timeframe']
-    
-    # Create visualizer
-    visualizer = PredictionVisualizer()
-    
-    # Create report
-    logger.info(f"Creating evaluation report for {symbol} ({timeframe})...")
-    visualizer.create_comparison_report(
-        evaluation_result,
-        symbol,
-        timeframe,
-        save_path=f"{symbol}_{timeframe}_report.txt"
-    )
-    
-    # Plot predictions
-    if HAS_MATPLOTLIB:
-        logger.info(f"Creating visualization for {symbol} ({timeframe})...")
-        visualizer.plot_predictions(
-            evaluation_result,
-            symbol,
-            timeframe,
-            save_path=f"{symbol}_{timeframe}_predictions.png"
-        )
+    main()

@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 import argparse
 
+# Add current directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from model_multi_timeframe import MultiTimeframeFusion
 from data_manager import DataManager
 
@@ -33,17 +36,17 @@ class MultiTimeframeTrainer:
         logger.info(f'Model: MultiTimeframeFusion')
     
     def prepare_data(self, seq_len_1h=60):
-        """時歖準備 1h 和 15m 的數據"""
+        """Prepare 1h and 15m data"""
         logger.info(f'Loading {self.symbol} data for 1h and 15m...')
         
         try:
-            # 載入 1h 數據
+            # Load 1h data
             data_1h = self.dm.load_data(self.symbol, '1h')
             if data_1h is None or len(data_1h) < seq_len_1h:
                 logger.error(f'Insufficient 1h data for {self.symbol}')
                 return None, None, None
             
-            # 載入 15m 數據
+            # Load 15m data
             data_15m = self.dm.load_data(self.symbol, '15m')
             if data_15m is None or len(data_15m) < seq_len_1h * 4:
                 logger.error(f'Insufficient 15m data for {self.symbol}')
@@ -51,7 +54,7 @@ class MultiTimeframeTrainer:
             
             logger.info(f'Loaded {len(data_1h)} rows for 1h, {len(data_15m)} rows for 15m')
             
-            # 建立數據序列
+            # Create sequences
             X_1h, y_1h = self._create_sequences(data_1h, seq_len_1h)
             X_15m, y_15m = self._create_sequences(data_15m, seq_len_1h * 4)
             
@@ -59,7 +62,7 @@ class MultiTimeframeTrainer:
                 logger.error(f'Failed to create sequences for {self.symbol}')
                 return None, None, None
             
-            # 對齊 標籤
+            # Align labels
             min_len = min(len(y_1h), len(y_15m))
             X_1h = torch.FloatTensor(X_1h[:min_len]).to(self.device)
             X_15m = torch.FloatTensor(X_15m[:min_len]).to(self.device)
@@ -70,6 +73,8 @@ class MultiTimeframeTrainer:
             
         except Exception as e:
             logger.error(f'Error preparing data: {str(e)}')
+            import traceback
+            traceback.print_exc()
             return None, None, None
     
     def _create_sequences(self, data, seq_len=60):
@@ -105,11 +110,11 @@ class MultiTimeframeTrainer:
             for x_1h_batch, x_15m_batch, y_batch in loader:
                 self.optimizer.zero_grad()
                 
-                # 前向傳播
+                # Forward pass
                 pred = self.model(x_1h_batch, x_15m_batch)
                 loss = self.criterion(pred, y_batch)
                 
-                # 反向傳播
+                # Backward pass
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()

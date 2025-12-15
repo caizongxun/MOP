@@ -11,6 +11,7 @@ import numpy as np
 from config.model_config import MODEL_CONFIG, CRYPTOCURRENCIES, MODEL_FEATURES, DATA_CONFIG
 from backend.models.lstm_model import CryptoLSTM
 from backend.data.data_loader import CryptoDataLoader
+from backend.data.data_manager import DataManager
 
 # Setup logging
 logging.basicConfig(
@@ -28,13 +29,16 @@ class ModelTrainer:
     Trainer for cryptocurrency price prediction models
     Supports:
     - Multi-timeframe training (15m, 1h)
-    - 19 technical indicator features
+    - 35+ technical indicator features
     - Unified models across timeframes
+    - Reading from local storage with API fallback
     """
     
-    def __init__(self, config=MODEL_CONFIG, data_config=DATA_CONFIG):
+    def __init__(self, config=MODEL_CONFIG, data_config=DATA_CONFIG, use_local_data=True):
         self.config = config
         self.data_config = data_config
+        self.use_local_data = use_local_data
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"Using device: {self.device}")
         logger.info(f"GPU available: {torch.cuda.is_available()}")
@@ -45,12 +49,59 @@ class ModelTrainer:
             lookback_period=config['lookback'],
             use_binance_api=data_config['use_binance_api']
         )
+        
+        # Initialize data manager for local storage
+        if self.use_local_data:
+            self.data_manager = DataManager(
+                data_dir='data/raw',
+                timeframes=data_config['timeframes']
+            )
+        else:
+            self.data_manager = None
+        
         self.models = {}
         self.histories = {}
     
+    def get_data(self, symbol, timeframe):
+        """
+        Get data from local storage or API
+        Priority: Local storage -> API
+        
+        Args:
+            symbol: Cryptocurrency symbol
+            timeframe: Timeframe (15m, 1h)
+        
+        Returns:
+            DataFrame with OHLCV data
+        """
+        # Try local storage first
+        if self.use_local_data and self.data_manager:
+            logger.info(f"Attempting to load {symbol} ({timeframe}) from local storage...")
+            data = self.data_manager.get_stored_data(symbol, timeframe)
+            if data is not None and not data.empty:
+                logger.info(f"Loaded {len(data)} rows from local storage")
+                return data
+            else:
+                logger.info(f"No local data found, falling back to API...")
+        
+        # Fallback to API
+        logger.info(f"Fetching {symbol} ({timeframe}) from API...")
+        data = self.data_loader.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            limit=self.data_config['history_limit']
+        )
+        
+        if data is not None and not data.empty:
+            # Save to local storage for future use
+            if self.use_local_data and self.data_manager:
+                self.data_manager.save_data(symbol, timeframe, data)
+        
+        return data
+    
     def prepare_data_multi_features(self, symbol, data):
         """
-        Prepare data with 19 technical indicators
+        Prepare data with technical indicators
         
         Args:
             symbol: Cryptocurrency symbol
@@ -62,16 +113,17 @@ class ModelTrainer:
         # Calculate technical indicators
         data_with_indicators = self.data_loader.calculate_technical_indicators(data)
         
-        # Select features for training
-        features = [f for f in MODEL_FEATURES if f in data_with_indicators.columns]
-        
-        logger.info(f"Using {len(features)} features: {features}")
+        # Get available features
+        available_features = self.data_loader.available_features
+        logger.info(f"Available features: {len(available_features)}")
         
         # Normalize all features independently
-        normalized = self.data_loader.normalize_features(
+        normalized, features_used = self.data_loader.normalize_features(
             data_with_indicators,
-            features_to_use=features
+            features_to_use=available_features
         )
+        
+        logger.info(f"Using {len(features_used)} features for training")
         
         # Create sequences
         X, y = self.data_loader.create_sequences(
@@ -85,7 +137,9 @@ class ModelTrainer:
         y = torch.FloatTensor(y).unsqueeze(1).to(self.device)
         
         logger.info(f"Data shape - X: {X.shape}, y: {y.shape}")
-        return X, y
+        
+        # Return dynamic feature count
+        return X, y, len(features_used)
     
     def train_model_single_timeframe(self, symbol, timeframe='15m'):
         """
@@ -100,13 +154,8 @@ class ModelTrainer:
         logger.info(f"{'='*60}")
         
         try:
-            # Fetch data
-            logger.info(f"Fetching {self.data_config['history_limit']} candles for {symbol} ({timeframe})...")
-            data = self.data_loader.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                limit=self.data_config['history_limit']
-            )
+            # Get data from local or API
+            data = self.get_data(symbol, timeframe)
             
             if data is None or data.empty:
                 logger.warning(f"No data available for {symbol} ({timeframe})")
@@ -115,7 +164,7 @@ class ModelTrainer:
             logger.info(f"Loaded {len(data)} candles")
             
             # Prepare data with technical indicators
-            X, y = self.prepare_data_multi_features(symbol, data)
+            X, y, num_features = self.prepare_data_multi_features(symbol, data)
             
             if len(X) < 2:
                 logger.warning(f"Insufficient data sequences for {symbol} ({timeframe})")
@@ -129,9 +178,9 @@ class ModelTrainer:
                 shuffle=True
             )
             
-            # Initialize model with 19 input features
+            # Initialize model with dynamic input size
             model = CryptoLSTM(
-                input_size=len(MODEL_FEATURES),  # 19 features
+                input_size=num_features,  # Dynamic feature count
                 hidden_size=self.config['hidden_size'],
                 num_layers=self.config['num_layers'],
                 dropout=self.config['dropout'],
@@ -146,7 +195,7 @@ class ModelTrainer:
                 mode='min',
                 factor=0.5,
                 patience=10,
-                verbose=True
+                verbose=False
             )
             
             # Training loop
@@ -212,7 +261,6 @@ class ModelTrainer:
     def train_unified_model(self, symbol):
         """
         Train unified model on combined 15m + 1h data
-        Creates a single model robust across timeframes
         
         Args:
             symbol: Cryptocurrency symbol
@@ -224,11 +272,11 @@ class ModelTrainer:
         
         try:
             # Fetch multi-timeframe data
-            all_data = self.data_loader.fetch_multi_timeframe_data(
-                symbol,
-                timeframes=self.data_config['timeframes'],
-                limit=self.data_config['history_limit']
-            )
+            all_data = {}
+            for timeframe in self.data_config['timeframes']:
+                data = self.get_data(symbol, timeframe)
+                if data is not None and not data.empty:
+                    all_data[timeframe] = data
             
             if not all_data:
                 logger.warning(f"No data available for unified training of {symbol}")
@@ -241,10 +289,12 @@ class ModelTrainer:
             for timeframe in self.data_config['timeframes']:
                 if timeframe in all_data:
                     data = all_data[timeframe]
-                    features = [f for f in MODEL_FEATURES if f in data.columns]
-                    normalized = self.data_loader.normalize_features(
-                        data,
-                        features_to_use=features
+                    data_with_indicators = self.data_loader.calculate_technical_indicators(data)
+                    available_features = self.data_loader.available_features
+                    
+                    normalized, features_used = self.data_loader.normalize_features(
+                        data_with_indicators,
+                        features_to_use=available_features
                     )
                     X, y = self.data_loader.create_sequences(
                         normalized,
@@ -268,9 +318,10 @@ class ModelTrainer:
                 shuffle=True
             )
             
-            # Initialize unified model
+            # Initialize unified model with dynamic input size
+            num_features = X.shape[2]
             model = CryptoLSTM(
-                input_size=len(MODEL_FEATURES),
+                input_size=num_features,
                 hidden_size=self.config['hidden_size'],
                 num_layers=self.config['num_layers'],
                 dropout=self.config['dropout'],
@@ -341,15 +392,13 @@ class ModelTrainer:
     def train_all_models(self):
         """
         Train models for all cryptocurrencies
-        Supports:
-        - Individual timeframe models (15m, 1h)
-        - Unified multi-timeframe models
         """
         logger.info(f"Starting training for {len(CRYPTOCURRENCIES)} cryptocurrencies...")
         logger.info(f"Timeframes: {self.data_config['timeframes']}")
-        logger.info(f"History: {self.data_config['history_limit']} candles")
-        logger.info(f"Features: {len(MODEL_FEATURES)} technical indicators")
+        logger.info(f"History: {self.data_config['history_limit']} candles per API call")
+        logger.info(f"Features: 35+ dynamic technical indicators")
         logger.info(f"Model config: {self.config}")
+        logger.info(f"Local data: {self.use_local_data}")
         
         results = {}
         
@@ -378,10 +427,15 @@ class ModelTrainer:
         
         logger.info(f"\n{'='*60}")
         logger.info(f"Total models trained: {sum(1 for s in results.values() for st in s.values() if st == 'Success')}")
+        
+        # Print data statistics
+        if self.data_manager:
+            self.data_manager.print_statistics()
 
 if __name__ == "__main__":
     # Create logs directory
     Path('logs').mkdir(exist_ok=True)
     
-    trainer = ModelTrainer()
+    # Use local data if available, fallback to API
+    trainer = ModelTrainer(use_local_data=True)
     trainer.train_all_models()

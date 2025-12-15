@@ -151,47 +151,65 @@ class ModelInference:
             return None
         
         logger.info(f"\nGenerating {num_predictions} predictions...")
+        logger.info(f"Available data points: {len(data_normalized)}")
+        logger.info(f"Lookback window: {lookback}")
+        logger.info(f"Max sequences possible: {len(data_normalized) - lookback + 1}")
+        
         predictions = []
         timestamps = []
         actual_prices = []
         
         with torch.no_grad():
             for i in range(num_predictions):
-                # Start from the end and work backwards
-                # Last prediction uses data from [-lookback:]
-                # Second-to-last uses data from [-lookback-1:-1], etc.
-                end_idx = len(data_normalized) - (num_predictions - 1 - i)
-                start_idx = end_idx - lookback
+                # Use the last available data for all predictions
+                # Last lookback samples end at index len(data_normalized)-1
+                start_idx = len(data_normalized) - lookback
+                end_idx = len(data_normalized)
+                
+                # Adjust if we need historical predictions
+                if i > 0:
+                    # For historical predictions, shift back
+                    offset = i
+                    if len(data_normalized) - lookback - offset < 0:
+                        logger.warning(f"Not enough historical data for prediction {i+1}")
+                        continue
+                    start_idx = len(data_normalized) - lookback - offset
+                    end_idx = len(data_normalized) - offset
                 
                 if start_idx < 0:
                     logger.warning(f"Not enough historical data for prediction {i+1}")
                     continue
                 
-                logger.info(f"  Prediction {i+1}: using data from index {start_idx} to {end_idx}")
+                logger.info(f"\nPrediction {i+1}: using data from index {start_idx} to {end_idx-1}")
                 
                 x = data_normalized[all_feature_cols].iloc[start_idx:end_idx].values
                 x_tensor = torch.FloatTensor(x).unsqueeze(0).to(self.device)
                 
-                logger.info(f"    x shape: {x.shape}, x_tensor shape: {x_tensor.shape}")
+                logger.info(f"  x shape: {x.shape}, x_tensor shape: {x_tensor.shape}")
                 
                 try:
                     pred = model(x_tensor).cpu().numpy()[0, 0]
                     predictions.append(float(pred))
                     
-                    # Timestamp is at the end_idx position
-                    if end_idx < len(data_with_indicators.index):
-                        timestamp = data_with_indicators.index[end_idx]
+                    # Timestamp is at the end_idx-1 position
+                    timestamp_idx = end_idx - 1
+                    if timestamp_idx < len(data_with_indicators.index):
+                        timestamp = data_with_indicators.index[timestamp_idx]
                         timestamps.append(str(timestamp))
-                        actual_price = float(data_with_indicators['close'].iloc[end_idx])
+                        actual_price = float(data_with_indicators['close'].iloc[timestamp_idx])
                         actual_prices.append(actual_price)
-                        logger.info(f"    Prediction: {pred:.6f}, Actual: {actual_price:.6f}, Timestamp: {timestamp}")
+                        logger.info(f"  Predicted (normalized): {pred:.6f}")
+                        logger.info(f"  Actual price: {actual_price:.6f}")
+                        logger.info(f"  Timestamp: {timestamp}")
                     else:
-                        logger.warning(f"    Timestamp index {end_idx} out of bounds")
+                        logger.warning(f"  Timestamp index {timestamp_idx} out of bounds")
+                        continue
                 
                 except Exception as e:
                     logger.error(f"Error on prediction {i+1}: {str(e)}")
                     import traceback
                     traceback.print_exc()
+                    continue
         
         if not predictions:
             logger.error("No successful predictions")

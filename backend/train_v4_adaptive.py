@@ -5,6 +5,7 @@ Target: MAPE < 2% for all symbols
 """
 
 import os
+import sys
 import json
 import logging
 import numpy as np
@@ -21,11 +22,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_percentage_error, mean_absolute_error, mean_squared_error
 import xgboost as xgb
-
-from backend.data_manager import DataManager
-from backend.feature_engineering import FeatureEngineer
-from backend.models.lstm_model import LSTMModel
-from backend.models.xgboost_model import XGBoostModel
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +151,72 @@ class LSTMWithWarmup(nn.Module):
         return out
 
 
+class FeatureCalculator:
+    """計算技術指標"""
+    
+    @staticmethod
+    def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+        """計算技術指標"""
+        df = df.copy()
+        
+        # Price-based indicators
+        df['ema_10'] = df['close'].ewm(span=10).mean()
+        df['ema_20'] = df['close'].ewm(span=20).mean()
+        df['ema_50'] = df['close'].ewm(span=50).mean()
+        df['sma_10'] = df['close'].rolling(10).mean()
+        df['sma_20'] = df['close'].rolling(20).mean()
+        
+        # Volatility indicators
+        df['atr_14'] = df[['high', 'low', 'close']].apply(
+            lambda x: pd.Series([
+                (x['high'] - x['low']).rolling(14).mean().iloc[-1] if len(x) >= 14 else 0
+            ]), axis=1
+        )[0]
+        
+        # Momentum indicators
+        df['rsi_14'] = FeatureCalculator._calculate_rsi(df['close'], 14)
+        df['macd'] = (df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean())
+        df['momentum'] = df['close'] - df['close'].shift(12)
+        
+        # Volume indicators
+        df['volume_ma'] = df['volume'].rolling(20).mean()
+        df['volume_change'] = df['volume'].pct_change()
+        
+        # Additional features
+        df['high_low_ratio'] = df['high'] / df['low']
+        df['close_open_ratio'] = df['close'] / df['open']
+        
+        return df.fillna(method='bfill').fillna(method='ffill')
+    
+    @staticmethod
+    def _calculate_rsi(prices, period=14):
+        """計算RSI"""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+
 class V4AdaptiveTrainer:
     """V4 自適應訓練器"""
     
-    def __init__(self, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
-        self.device = device
-        self.data_manager = DataManager()
-        self.feature_engineer = FeatureEngineer()
-        logger.info(f"V4 Adaptive Trainer initialized with device: {device}")
+    def __init__(self, data_dir: str = 'backend/data/raw', device: str = None):
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
+        self.data_dir = data_dir
+        self.feature_calc = FeatureCalculator()
+        logger.info(f"V4 Adaptive Trainer initialized with device: {self.device}")
+    
+    def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
+        """加載数據"""
+        filepath = os.path.join(self.data_dir, f"{symbol}_{timeframe}.csv")
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Data not found: {filepath}")
+        return pd.read_csv(filepath)
     
     def train_symbol(self, symbol: str, target_mape: float = 0.02) -> Dict:
         """訓練單個幣種，自動調整超參數"""
@@ -173,7 +227,7 @@ class V4AdaptiveTrainer:
         
         try:
             # 1. 加載數據
-            raw_data = self.data_manager.load_data(symbol)
+            raw_data = self.load_data(symbol)
             logger.info(f"Loaded {len(raw_data)} rows for {symbol}")
             
             # 2. 計算波動性
@@ -194,7 +248,7 @@ class V4AdaptiveTrainer:
             logger.info(f"XGBoost Config: {config['xgb']}\n")
             
             # 4. 特徵工程
-            features_df = self.feature_engineer.calculate_features(raw_data)
+            features_df = self.feature_calc.calculate_features(raw_data)
             logger.info(f"Generated {len(features_df.columns)} features")
             
             # 5. 數據預處理
@@ -267,14 +321,16 @@ class V4AdaptiveTrainer:
         
         except Exception as e:
             logger.error(f"Error training {symbol}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {'symbol': symbol, 'status': 'error', 'error': str(e)}
     
     def _prepare_data(self, features_df: pd.DataFrame, raw_data: pd.DataFrame,
                      seq_length: int = 60) -> Tuple[np.ndarray, np.ndarray, StandardScaler, StandardScaler]:
         """準備LSTM訓練數據"""
         
-        features = features_df.values
-        target = raw_data['close'].values[len(raw_data) - len(features_df):]
+        features = features_df.dropna().values
+        target = raw_data['close'].values[-len(features):]
         
         scaler_X = StandardScaler()
         scaler_y = StandardScaler()
@@ -345,6 +401,7 @@ class V4AdaptiveTrainer:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
+                Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), f'backend/models/weights/{symbol}_lstm_best.pth')
             else:
                 patience_counter += 1
@@ -376,8 +433,7 @@ class V4AdaptiveTrainer:
         model = xgb.XGBRegressor(
             **config,
             random_state=42,
-            n_jobs=-1,
-            gpu_id=0 if self.device == 'cuda' else None
+            n_jobs=-1
         )
         
         model.fit(
@@ -396,6 +452,7 @@ class V4AdaptiveTrainer:
         mae = mean_absolute_error(y_test_orig, y_test_pred_orig)
         rmse = np.sqrt(mean_squared_error(y_test_orig, y_test_pred_orig))
         
+        Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
         model.save_model(f'backend/models/weights/{symbol}_1h_v4_xgb.json')
         
         logger.info(f"XGBoost Training completed")
@@ -407,6 +464,9 @@ class V4AdaptiveTrainer:
     
     def _save_models(self, lstm_model: nn.Module, symbol: str, category: str):
         """保存模型和配置"""
+        Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
+        Path('backend/models/config').mkdir(parents=True, exist_ok=True)
+        
         torch.save(lstm_model.state_dict(), f'backend/models/weights/{symbol}_1h_v4_lstm.pth')
         
         config = AdaptiveHyperparameterConfig.get_config(category)
@@ -440,7 +500,6 @@ class V4AdaptiveTrainer:
                 if result.get('test_mape', 1) <= target_mape:
                     successful += 1
         
-        # 生成總結報告
         summary = self._generate_summary(results, symbols, successful, target_mape)
         return summary
     
@@ -482,9 +541,8 @@ class V4AdaptiveTrainer:
             logger.info(f"Median MAPE: {summary['median_mape']*100:.4f}%")
             logger.info(f"Range: {summary['min_mape']*100:.4f}% - {summary['max_mape']*100:.4f}%")
         
-        # 保存總結
-        summary_path = f"backend/results/v4_training_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         Path("backend/results").mkdir(parents=True, exist_ok=True)
+        summary_path = f"backend/results/v4_training_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)

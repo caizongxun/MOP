@@ -334,14 +334,23 @@ class V4AdaptiveTrainer:
         with torch.no_grad():
             _, hidden = model.lstm(X_t)
             features = hidden[-1].cpu().numpy()
-        return features.reshape(features.shape[0], -1)
+        # Ensure 2D: (batch_size, hidden_size)
+        if len(features.shape) == 1:
+            features = features.reshape(-1, 1)
+        return np.ascontiguousarray(features)
     
     def _train_xgboost(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
         """Train XGBoost - simple one-shot training"""
-        # Ensure y arrays are 1D
-        y_train = np.asarray(y_train).ravel()
-        y_val = np.asarray(y_val).ravel()
-        y_test = np.asarray(y_test).ravel()
+        # Ensure proper shapes
+        X_train = np.ascontiguousarray(X_train)
+        X_val = np.ascontiguousarray(X_val)
+        X_test = np.ascontiguousarray(X_test)
+        
+        y_train = np.asarray(y_train).ravel().astype(np.float32)
+        y_val = np.asarray(y_val).ravel().astype(np.float32)
+        y_test = np.asarray(y_test).ravel().astype(np.float32)
+        
+        logger.info(f"XGBoost input shapes - X_train: {X_train.shape}, y_train: {y_train.shape}")
         
         model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
         model.fit(X_train, y_train, verbose=False)

@@ -275,13 +275,20 @@ class LSTMXGBoostTrainer:
             gpu_id=0 if torch.cuda.is_available() else None
         )
         
-        # Train
-        eval_set = [(lstm_features_val, y_val)]
+        # Train with callbacks for early stopping
+        from xgboost import callback
+        
+        early_stop_callback = callback.EarlyStopping(
+            rounds=20,
+            metric_name='rmse',
+            save_best=True
+        )
+        
         xgb_model.fit(
             lstm_features_train, y_train,
-            eval_set=eval_set,
-            verbose=10,
-            early_stopping_rounds=20
+            eval_set=[(lstm_features_val, y_val)],
+            callbacks=[early_stop_callback],
+            verbose=10
         )
         
         logger.info(f'XGBoost training completed')

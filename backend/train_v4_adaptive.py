@@ -338,6 +338,11 @@ class V4AdaptiveTrainer:
     
     def _train_xgboost(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
         """Train XGBoost - simple one-shot training"""
+        # Ensure y arrays are 1D
+        y_train = np.asarray(y_train).ravel()
+        y_val = np.asarray(y_val).ravel()
+        y_test = np.asarray(y_test).ravel()
+        
         model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
         model.fit(X_train, y_train, verbose=False)
         

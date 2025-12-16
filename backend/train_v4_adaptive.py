@@ -168,10 +168,8 @@ class FeatureCalculator:
         
         # Volatility indicators
         df['atr_14'] = df[['high', 'low', 'close']].apply(
-            lambda x: pd.Series([
-                (x['high'] - x['low']).rolling(14).mean().iloc[-1] if len(x) >= 14 else 0
-            ]), axis=1
-        )[0]
+            lambda x: (x['high'] - x['low']).mean() if len(x) >= 14 else 0, axis=1
+        )
         
         # Momentum indicators
         df['rsi_14'] = FeatureCalculator._calculate_rsi(df['close'], 14)
@@ -212,11 +210,19 @@ class V4AdaptiveTrainer:
         logger.info(f"V4 Adaptive Trainer initialized with device: {self.device}")
     
     def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
-        """加載数據"""
+        """加載數據"""
         filepath = os.path.join(self.data_dir, f"{symbol}_{timeframe}.csv")
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Data not found: {filepath}")
-        return pd.read_csv(filepath)
+        
+        df = pd.read_csv(filepath)
+        
+        # 移除非數值列（timestamp, openTime, closeTime等）
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        available_cols = [col for col in numeric_cols if col in df.columns]
+        df = df[available_cols]
+        
+        return df
     
     def train_symbol(self, symbol: str, target_mape: float = 0.02) -> Dict:
         """訓練單個幣種，自動調整超參數"""
@@ -329,8 +335,11 @@ class V4AdaptiveTrainer:
                      seq_length: int = 60) -> Tuple[np.ndarray, np.ndarray, StandardScaler, StandardScaler]:
         """準備LSTM訓練數據"""
         
-        features = features_df.dropna().values
-        target = raw_data['close'].values[-len(features):]
+        # 只算數值列
+        numeric_features = features_df.select_dtypes(include=[np.number]).dropna()
+        
+        features = numeric_features.values
+        target = raw_data['close'].values[-len(numeric_features):]
         
         scaler_X = StandardScaler()
         scaler_y = StandardScaler()

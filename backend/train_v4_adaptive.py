@@ -332,37 +332,34 @@ class V4AdaptiveTrainer:
         return model
     
     def _extract_lstm_features(self, model, X):
-        """Extract LSTM features"""
+        """Extract LSTM features and reshape to 2D for XGBoost"""
         X_t = torch.FloatTensor(X).to(self.device)
         model.eval()
         with torch.no_grad():
             _, hidden = model.lstm(X_t)
             features = hidden[-1].cpu().numpy()
-        return features
+        return features.reshape(features.shape[0], -1)
     
     def _train_xgboost_with_early_stopping(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
         """Train XGBoost with custom early stopping based on validation loss"""
         early_stopping_patience = config.pop('early_stopping_patience', 15)
-        model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
+        n_est_total = config.pop('n_estimators', 500)
+        model = xgb.XGBRegressor(n_estimators=n_est_total, **config, random_state=42, n_jobs=-1, verbosity=0)
         
         best_val_score = float('inf')
-        best_model_state = None
         patience_counter = 0
         n_rounds_used = 0
         
-        # Train incrementally, monitoring validation loss
-        chunk_size = max(10, config.get('n_estimators', 500) // 20)
-        max_estimators = config.get('n_estimators', 500)
+        chunk_size = max(10, n_est_total // 20)
         
-        for round_idx in range(0, max_estimators, chunk_size):
-            n_est = min(chunk_size, max_estimators - round_idx)
+        for round_idx in range(0, n_est_total, chunk_size):
+            n_est = min(chunk_size, n_est_total - round_idx)
             if round_idx == 0:
                 model.set_params(n_estimators=n_est)
                 model.fit(X_train, y_train, verbose=False)
             else:
                 model.fit(X_train, y_train, verbose=False)
             
-            # Evaluate on validation set
             y_val_pred = model.predict(X_val)
             val_score = mean_squared_error(y_val, y_val_pred)
             n_rounds_used += n_est
@@ -370,7 +367,6 @@ class V4AdaptiveTrainer:
             if val_score < best_val_score:
                 best_val_score = val_score
                 patience_counter = 0
-                best_model_state = dict(model.get_params())
                 logger.info(f"XGBoost Epoch {n_rounds_used:3d}: Val_MSE={val_score:.6f} (improved)")
             else:
                 patience_counter += 1

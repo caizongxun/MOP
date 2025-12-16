@@ -151,14 +151,41 @@ class FeatureCalculator:
 class V4AdaptiveTrainer:
     """V4 Adaptive trainer"""
     
-    def __init__(self, data_dir: str = 'backend/data/raw', device: str = None):
+    def __init__(self, data_dir: str = None, device: str = None):
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
-        self.data_dir = data_dir
+        
+        # Find correct data directory
+        if data_dir is None:
+            self.data_dir = self._find_data_dir()
+        else:
+            self.data_dir = data_dir
+        
         self.feature_calc = FeatureCalculator()
         logger.info(f"V4 Adaptive Trainer initialized with device: {self.device}")
+        logger.info(f"Data directory: {self.data_dir}")
+    
+    def _find_data_dir(self) -> str:
+        """Find data directory by searching common paths"""
+        # Try multiple possible paths
+        possible_paths = [
+            'backend/data/raw',
+            './backend/data/raw',
+            '../backend/data/raw',
+            'data/raw',
+            './data/raw',
+        ]
+        
+        for path in possible_paths:
+            if os.path.isdir(path):
+                return os.path.abspath(path)
+        
+        # If not found, create and return default
+        default = os.path.abspath('backend/data/raw')
+        logger.warning(f"Data directory not found, using default: {default}")
+        return default
     
     def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
         """Load data"""

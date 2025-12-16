@@ -76,11 +76,12 @@ class LSTMXGBoostTrainer:
         self.xgb_params = {
             'max_depth': 6,
             'learning_rate': 0.05,
-            'n_estimators': 500,
+            'n_estimators': 300,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'reg_alpha': 1,
             'reg_lambda': 1,
+            'random_state': 42,
         }
         
         logger.info(f'LSTM Config: {self.lstm_config}')
@@ -267,28 +268,18 @@ class LSTMXGBoostTrainer:
         logger.info(f'Stage 2: Training XGBoost Regressor for {symbol}')
         logger.info(f'{"="*80}')
         
-        # Create XGBoost model
+        # Create XGBoost model - simple training without early stopping
         xgb_model = xgb.XGBRegressor(
             **self.xgb_params,
-            random_state=42,
-            tree_method='gpu_hist' if torch.cuda.is_available() else 'auto',
-            gpu_id=0 if torch.cuda.is_available() else None
+            tree_method='auto',
+            verbosity=1
         )
         
-        # Train with callbacks for early stopping
-        from xgboost import callback
-        
-        early_stop_callback = callback.EarlyStopping(
-            rounds=20,
-            metric_name='rmse',
-            save_best=True
-        )
-        
+        # Train
+        logger.info(f'Training on {len(lstm_features_train)} samples')
         xgb_model.fit(
             lstm_features_train, y_train,
-            eval_set=[(lstm_features_val, y_val)],
-            callbacks=[early_stop_callback],
-            verbose=10
+            verbose=True
         )
         
         logger.info(f'XGBoost training completed')

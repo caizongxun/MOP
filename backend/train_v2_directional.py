@@ -53,7 +53,7 @@ class DirectionalLSTM(nn.Module):
 class DirectionalTrainer:
     """Train directional prediction model for sharp, actionable predictions"""
     
-    def __init__(self, device=None, threshold_pct=2.0, use_weighted_loss=True):
+    def __init__(self, device=None, threshold_pct=0.5, use_weighted_loss=True):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dm = DataManager()
         self.data_loader = CryptoDataLoader()
@@ -157,7 +157,11 @@ class DirectionalTrainer:
         
         # Log class distribution
         unique, counts = np.unique(labels, return_counts=True)
-        logger.info(f'Label distribution: Down={counts[0] if 0 in unique else 0}, Neutral={counts[1] if 1 in unique else 0}, Up={counts[2] if 2 in unique else 0}')
+        class_dist = {}
+        for u, c in zip(unique, counts):
+            class_name = ['DOWN', 'NEUTRAL', 'UP'][u]
+            class_dist[class_name] = c
+        logger.info(f'Label distribution: {class_dist}')
         
         # Create sequences (remove last label since we predict next direction)
         lookback_period = 60
@@ -322,14 +326,23 @@ class DirectionalTrainer:
         # Metrics
         test_acc = accuracy_score(y_test, test_pred)
         precision, recall, f1, _ = precision_recall_fscore_support(y_test, test_pred, average='weighted', zero_division=0)
-        cm = confusion_matrix(y_test, test_pred)
+        cm = confusion_matrix(y_test, test_pred, labels=[0, 1, 2])
         
         logger.info(f'\n{symbol} V2 Directional Final Results:')
         logger.info(f'  Overall Accuracy: {test_acc:.4f}')
         logger.info(f'  Precision (weighted): {precision:.4f}')
         logger.info(f'  Recall (weighted): {recall:.4f}')
         logger.info(f'  F1 Score (weighted): {f1:.4f}')
-        logger.info(f'  Confusion Matrix:\n{cm}')
+        logger.info(f'  Confusion Matrix (Down/Neutral/Up):')
+        logger.info(f'{cm}')
+        
+        # Per-class metrics
+        p_per_class, r_per_class, f_per_class, _ = precision_recall_fscore_support(
+            y_test, test_pred, labels=[0, 1, 2], zero_division=0
+        )
+        logger.info(f'  Per-class - DOWN: P={p_per_class[0]:.4f} R={r_per_class[0]:.4f} F1={f_per_class[0]:.4f}')
+        logger.info(f'  Per-class - NEUTRAL: P={p_per_class[1]:.4f} R={r_per_class[1]:.4f} F1={f_per_class[1]:.4f}')
+        logger.info(f'  Per-class - UP: P={p_per_class[2]:.4f} R={r_per_class[2]:.4f} F1={f_per_class[2]:.4f}')
         
         return True
     
@@ -343,7 +356,7 @@ class DirectionalTrainer:
             ]
         
         logger.info(f'\n{"#"*80}')
-        logger.info(f'V2 Directional Training: {len(symbols)} symbols')
+        logger.info(f'V2 Directional Training: {len(symbols)} symbols (Threshold: {self.threshold_pct}%)')
         logger.info(f'{"#"*80}')
         
         success_count = 0
@@ -367,7 +380,7 @@ def main():
     parser.add_argument('--symbols', nargs='+', help='Symbols to train')
     parser.add_argument('--timeframe', default='1h', help='Timeframe')
     parser.add_argument('--epochs', type=int, default=100, help='Epochs')
-    parser.add_argument('--threshold', type=float, default=2.0, help='Classification threshold (%)')
+    parser.add_argument('--threshold', type=float, default=0.5, help='Classification threshold (%)')
     parser.add_argument('--device', default=None, help='Device')
     
     args = parser.parse_args()

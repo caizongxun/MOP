@@ -328,29 +328,32 @@ class V4AdaptiveTrainer:
         return model
     
     def _extract_lstm_features(self, model, X):
-        """Extract LSTM features and reshape to 2D for XGBoost"""
+        """Extract LSTM features for XGBoost - use last layer LSTM output"""
         X_t = torch.FloatTensor(X).to(self.device)
         model.eval()
         with torch.no_grad():
-            _, hidden = model.lstm(X_t)
-            features = hidden[-1].cpu().numpy()
+            lstm_out, (hidden, cell) = model.lstm(X_t)
+            # Use last output of LSTM (not hidden state)
+            # lstm_out shape: (batch_size, seq_length, hidden_size)
+            # Take the last timestep: (batch_size, hidden_size)
+            features = lstm_out[:, -1, :].cpu().numpy()
+        
         # Ensure 2D: (batch_size, hidden_size)
-        if len(features.shape) == 1:
-            features = features.reshape(-1, 1)
-        return np.ascontiguousarray(features)
+        assert len(features.shape) == 2, f"Features shape should be 2D, got {features.shape}"
+        return np.ascontiguousarray(features.astype(np.float32))
     
     def _train_xgboost(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
         """Train XGBoost - simple one-shot training"""
-        # Ensure proper shapes
-        X_train = np.ascontiguousarray(X_train)
-        X_val = np.ascontiguousarray(X_val)
-        X_test = np.ascontiguousarray(X_test)
+        # Ensure proper shapes and types
+        X_train = np.ascontiguousarray(X_train.astype(np.float32))
+        X_test = np.ascontiguousarray(X_test.astype(np.float32))
         
-        y_train = np.asarray(y_train).ravel().astype(np.float32)
-        y_val = np.asarray(y_val).ravel().astype(np.float32)
-        y_test = np.asarray(y_test).ravel().astype(np.float32)
+        y_train = np.asarray(y_train, dtype=np.float32).ravel()
+        y_test = np.asarray(y_test, dtype=np.float32).ravel()
         
         logger.info(f"XGBoost input shapes - X_train: {X_train.shape}, y_train: {y_train.shape}")
+        logger.info(f"X_train ndim: {X_train.ndim}, dtype: {X_train.dtype}")
+        logger.info(f"y_train ndim: {y_train.ndim}, dtype: {y_train.dtype}")
         
         model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
         model.fit(X_train, y_train, verbose=False)

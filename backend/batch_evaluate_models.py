@@ -18,7 +18,7 @@ if backend_path not in sys.path:
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models.lstm_model import ImprovedCryptoGRU
+from models.lstm_model import CryptoLSTM
 from data.data_manager import DataManager
 from data.data_loader import CryptoDataLoader
 from config.model_config import MODEL_CONFIG
@@ -64,9 +64,9 @@ class BatchModelEvaluator:
             checkpoint = torch.load(model_path, map_location=self.device)
             
             model_config = checkpoint.get('model_config', {})
-            model = ImprovedCryptoGRU(
-                input_size=model_config.get('input_size', 44),
-                hidden_size=model_config.get('hidden_size', 128),
+            model = CryptoLSTM(
+                input_size=model_config.get('input_size', 19),
+                hidden_size=model_config.get('hidden_size', 64),
                 num_layers=model_config.get('num_layers', 2),
                 output_size=model_config.get('output_size', 1)
             ).to(self.device)

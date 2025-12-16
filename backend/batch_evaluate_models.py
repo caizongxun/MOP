@@ -11,12 +11,17 @@ from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 from collections import defaultdict
 
+# Fix imports
+backend_path = os.path.dirname(os.path.abspath(__file__))
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend.models.lstm_model import ImprovedCryptoGRU
-from backend.data.data_manager import DataManager
-from backend.data.data_loader import CryptoDataLoader
-from backend.config.model_config import MODEL_CONFIG
+from models.lstm_model import ImprovedCryptoGRU
+from data.data_manager import DataManager
+from data.data_loader import CryptoDataLoader
+from config.model_config import MODEL_CONFIG
 
 logging.basicConfig(
     level=logging.INFO,

@@ -445,12 +445,23 @@ class V4AdaptiveTrainer:
             n_jobs=-1
         )
         
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            early_stopping_rounds=20,
-            verbose=False
-        )
+        try:
+            # 試用新的 XGBoost API (v1.0+)
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                early_stopping_rounds=20,
+                verbose=False
+            )
+        except TypeError:
+            # 彈回旧的 XGBoost API
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                eval_metric='rmse',
+                early_stopping_rounds=20,
+                verbose=False
+            )
         
         y_test_pred = model.predict(X_test)
         

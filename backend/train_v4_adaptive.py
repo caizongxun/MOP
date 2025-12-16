@@ -66,7 +66,8 @@ class AdaptiveHyperparameterConfig:
             },
             'xgb': {
                 'max_depth': 7, 'learning_rate': 0.02, 'n_estimators': 500,
-                'subsample': 0.9, 'colsample_bytree': 0.9, 'reg_alpha': 0.5, 'reg_lambda': 0.5
+                'subsample': 0.9, 'colsample_bytree': 0.9, 'reg_alpha': 0.5, 'reg_lambda': 0.5,
+                'early_stopping_patience': 20
             }
         },
         'medium': {
@@ -76,7 +77,8 @@ class AdaptiveHyperparameterConfig:
             },
             'xgb': {
                 'max_depth': 6, 'learning_rate': 0.035, 'n_estimators': 400,
-                'subsample': 0.85, 'colsample_bytree': 0.85, 'reg_alpha': 1, 'reg_lambda': 1
+                'subsample': 0.85, 'colsample_bytree': 0.85, 'reg_alpha': 1, 'reg_lambda': 1,
+                'early_stopping_patience': 15
             }
         },
         'high': {
@@ -86,7 +88,8 @@ class AdaptiveHyperparameterConfig:
             },
             'xgb': {
                 'max_depth': 5, 'learning_rate': 0.05, 'n_estimators': 300,
-                'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 2, 'reg_lambda': 2
+                'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 2, 'reg_lambda': 2,
+                'early_stopping_patience': 10
             }
         }
     }
@@ -218,9 +221,9 @@ class V4AdaptiveTrainer:
             logger.info(f"LSTM features: train={lstm_features_train.shape}, val={lstm_features_val.shape}, test={lstm_features_test.shape}\n")
             
             logger.info("="*80)
-            logger.info("Stage 2: Training XGBoost Regressor")
+            logger.info("Stage 2: Training XGBoost Regressor with Early Stopping")
             logger.info("="*80)
-            xgb_metrics = self._train_xgboost(
+            xgb_metrics = self._train_xgboost_with_early_stopping(
                 lstm_features_train, y_train, lstm_features_val, y_val,
                 lstm_features_test, y_test, config['xgb'], symbol, scaler_y
             )
@@ -230,6 +233,7 @@ class V4AdaptiveTrainer:
             logger.info(f"  Test MAPE: {test_mape*100:.4f}% (Target: {target_mape*100:.2f}%)")
             logger.info(f"  Test MAE: ${xgb_metrics['test_mae']:.2f}")
             logger.info(f"  Test RMSE: ${xgb_metrics['test_rmse']:.2f}")
+            logger.info(f"  Estimators used: {xgb_metrics.get('n_estimators_used', 'N/A')}")
             
             if test_mape <= target_mape:
                 logger.info(f"SUCCESS: {symbol} achieved target MAPE!\n")
@@ -336,10 +340,45 @@ class V4AdaptiveTrainer:
             features = hidden[-1].cpu().numpy()
         return features
     
-    def _train_xgboost(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
-        """Train XGBoost - simplified fit"""
+    def _train_xgboost_with_early_stopping(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
+        """Train XGBoost with custom early stopping based on validation loss"""
+        early_stopping_patience = config.pop('early_stopping_patience', 15)
         model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
-        model.fit(X_train, y_train, verbose=False)
+        
+        best_val_score = float('inf')
+        best_model_state = None
+        patience_counter = 0
+        n_rounds_used = 0
+        
+        # Train incrementally, monitoring validation loss
+        chunk_size = max(10, config.get('n_estimators', 500) // 20)
+        max_estimators = config.get('n_estimators', 500)
+        
+        for round_idx in range(0, max_estimators, chunk_size):
+            n_est = min(chunk_size, max_estimators - round_idx)
+            if round_idx == 0:
+                model.set_params(n_estimators=n_est)
+                model.fit(X_train, y_train, verbose=False)
+            else:
+                model.fit(X_train, y_train, verbose=False)
+            
+            # Evaluate on validation set
+            y_val_pred = model.predict(X_val)
+            val_score = mean_squared_error(y_val, y_val_pred)
+            n_rounds_used += n_est
+            
+            if val_score < best_val_score:
+                best_val_score = val_score
+                patience_counter = 0
+                best_model_state = dict(model.get_params())
+                logger.info(f"XGBoost Epoch {n_rounds_used:3d}: Val_MSE={val_score:.6f} (improved)")
+            else:
+                patience_counter += 1
+                logger.info(f"XGBoost Epoch {n_rounds_used:3d}: Val_MSE={val_score:.6f} (patience: {patience_counter}/{early_stopping_patience})")
+            
+            if patience_counter >= early_stopping_patience:
+                logger.info(f"Early stopping at estimator {n_rounds_used}")
+                break
         
         y_test_pred = model.predict(X_test)
         y_test_orig = scaler_y.inverse_transform(y_test.reshape(-1, 1)).ravel()
@@ -357,7 +396,7 @@ class V4AdaptiveTrainer:
         logger.info(f"Test MAE: ${mae:.2f}")
         logger.info(f"Test RMSE: ${rmse:.2f}")
         
-        return {'test_mape': mape, 'test_mae': mae, 'test_rmse': rmse}
+        return {'test_mape': mape, 'test_mae': mae, 'test_rmse': rmse, 'n_estimators_used': n_rounds_used}
     
     def _save_models(self, lstm_model, symbol, category):
         """Save models and config"""

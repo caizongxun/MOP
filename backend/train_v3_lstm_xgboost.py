@@ -168,7 +168,7 @@ class LSTMXGBoostTrainer:
         y = np.array(y_list, dtype=np.float32)
         xgb_features = np.array(xgb_features_list, dtype=np.float32)
         
-        logger.info(f'{symbol}: Data shape X={X.shape}, y={y.shape}')
+        logger.info(f'{symbol}: Data shape X={X.shape}, xgb_features={xgb_features.shape}, y={y.shape}')
         logger.info(f'Close price range: {close_min:.2f} - {close_max:.2f}')
         
         return X, y, xgb_features, (close_min, close_max), selected_features
@@ -271,7 +271,7 @@ class LSTMXGBoostTrainer:
         xgb_model = xgb.XGBRegressor(
             **self.xgb_params,
             random_state=42,
-            tree_method='gpu_hist',
+            tree_method='gpu_hist' if torch.cuda.is_available() else 'auto',
             gpu_id=0 if torch.cuda.is_available() else None
         )
         
@@ -326,22 +326,25 @@ class LSTMXGBoostTrainer:
             return False
         X, y, xgb_features, close_range, feature_names = result
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
-        )
-        xgb_train, xgb_test, _, _ = train_test_split(
-            xgb_features, y, test_size=0.2, shuffle=False
-        )
+        # Split: 70% train, 15% val, 15% test (NO SHUFFLE for time series)
+        total_len = len(X)
+        train_len = int(total_len * 0.7)
+        val_len = int(total_len * 0.15)
         
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train, y_train, test_size=0.2, shuffle=False
-        )
-        xgb_train, xgb_val, y_train_inner, y_val_inner = train_test_split(
-            xgb_train, y_train, test_size=0.2, shuffle=False
-        )
+        X_train = X[:train_len]
+        y_train = y[:train_len]
+        xgb_train = xgb_features[:train_len]
+        
+        X_val = X[train_len:train_len+val_len]
+        y_val = y[train_len:train_len+val_len]
+        xgb_val = xgb_features[train_len:train_len+val_len]
+        
+        X_test = X[train_len+val_len:]
+        y_test = y[train_len+val_len:]
+        xgb_test = xgb_features[train_len+val_len:]
         
         logger.info(f'Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}')
+        logger.info(f'XGB Train: {xgb_train.shape}, XGB Val: {xgb_val.shape}, XGB Test: {xgb_test.shape}')
         
         try:
             # Stage 1: Train LSTM
@@ -351,6 +354,8 @@ class LSTMXGBoostTrainer:
             lstm_train_features = self.extract_lstm_features(lstm_model, X_train)
             lstm_val_features = self.extract_lstm_features(lstm_model, X_val)
             lstm_test_features = self.extract_lstm_features(lstm_model, X_test)
+            
+            logger.info(f'LSTM features extracted: train={lstm_train_features.shape}, val={lstm_val_features.shape}, test={lstm_test_features.shape}')
             
             # Stage 2: Train XGBoost
             xgb_model = self.train_xgboost(

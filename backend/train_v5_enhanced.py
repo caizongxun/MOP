@@ -1,5 +1,5 @@
 """
-V5 Enhanced Model Training
+V5 Enhanced Model Training with Unified PathConfig
 
 Key improvements over V4:
 1. Residual Learning - Predict price deltas instead of absolute values
@@ -7,10 +7,11 @@ Key improvements over V4:
 3. Uncertainty Quantification - Learn confidence intervals
 4. Better Feature Engineering - Add momentum, volatility, micro-structure
 5. Advanced Regularization - Prevent mode collapse to mean value
-6. Ensemble Loss - Combine multiple objectives (regression + directional + volatility)
+6. Uses unified PathConfig for all file paths
 """
 
 import os
+import sys
 import json
 import logging
 import numpy as np
@@ -27,6 +28,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_percentage_error, mean_absolute_error, mean_squared_error
+
+# Add path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from path_config import PathConfig
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -155,21 +160,18 @@ class MultiScaleLSTMV5(nn.Module):
         return price_pred, uncertainty
 
 class V5EnhancedTrainer:
-    """V5 Training Pipeline"""
+    """V5 Training Pipeline with unified PathConfig"""
     
     def __init__(self, device: str = 'cpu'):
         self.device = torch.device(device)
         self.feature_calc = FeatureEngineerV5()
+        self.paths = PathConfig()
+        logger.info(f"V5 Trainer initialized with device: {device}")
+        logger.info(f"Models directory: {self.paths.models_weights_dir}")
     
     def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
-        """Load data"""
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
-        root_dir = os.path.dirname(backend_dir)
-        data_path = os.path.join(root_dir, 'backend', 'data', 'raw', f'{symbol}_{timeframe}.csv')
-        
-        if not os.path.exists(data_path):
-            data_path = os.path.join(backend_dir, 'data', 'raw', f'{symbol}_{timeframe}.csv')
-        
+        """Load data using PathConfig"""
+        data_path = self.paths.get_data_file(symbol, timeframe)
         df = pd.read_csv(data_path)
         logger.info(f"Loaded {len(df)} rows for {symbol}")
         return df
@@ -208,174 +210,203 @@ class V5EnhancedTrainer:
               epochs: int = 150, batch_size: int = 16, learning_rate: float = 0.0005):
         """Train V5 model"""
         logger.info(f"\n[{symbol_idx}/{num_symbols}] Training {symbol} with V5 Enhanced")
+        print(f"\nTraining {symbol}... [{symbol_idx}/{num_symbols}]")
         
-        # Load and prepare data
-        df = self.load_data(symbol)
-        close_prices = df['close'].values
-        
-        features_df = self.feature_calc.calculate_features(df)
-        X, y_delta, y_vol, scaler_X, scaler_delta, scaler_vol = self._prepare_data(
-            features_df, close_prices
-        )
-        
-        # Split: 70% train, 15% val, 15% test
-        train_idx = int(0.70 * len(X))
-        val_idx = int(0.85 * len(X))
-        
-        X_train, y_delta_train, y_vol_train = X[:train_idx], y_delta[:train_idx], y_vol[:train_idx]
-        X_val, y_delta_val, y_vol_val = X[train_idx:val_idx], y_delta[train_idx:val_idx], y_vol[train_idx:val_idx]
-        X_test, y_delta_test, y_vol_test = X[val_idx:], y_delta[val_idx:], y_vol[val_idx:]
-        
-        # Create datasets
-        train_dataset = TensorDataset(
-            torch.FloatTensor(X_train),
-            torch.FloatTensor(y_delta_train),
-            torch.FloatTensor(y_vol_train)
-        )
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        
-        val_dataset = TensorDataset(
-            torch.FloatTensor(X_val),
-            torch.FloatTensor(y_delta_val),
-            torch.FloatTensor(y_vol_val)
-        )
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-        
-        # Model
-        model = MultiScaleLSTMV5(input_size=X.shape[2]).to(self.device)
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, 
-                                                          patience=15, verbose=False)
-        
-        # Loss with weights
-        def combined_loss(pred_delta, pred_vol, true_delta, true_vol, uncertainty):
-            # Regression loss on delta
-            delta_loss = torch.mean((pred_delta - true_delta) ** 2)
+        try:
+            # Load and prepare data
+            df = self.load_data(symbol)
+            close_prices = df['close'].values
             
-            # Uncertainty-weighted loss
-            weighted_loss = torch.mean(((pred_delta - true_delta) ** 2) / (2 * uncertainty ** 2 + 1e-4))
+            features_df = self.feature_calc.calculate_features(df)
+            X, y_delta, y_vol, scaler_X, scaler_delta, scaler_vol = self._prepare_data(
+                features_df, close_prices
+            )
             
-            # Volatility loss
-            vol_loss = torch.mean((pred_vol - true_vol) ** 2)
+            # Split: 70% train, 15% val, 15% test
+            train_idx = int(0.70 * len(X))
+            val_idx = int(0.85 * len(X))
             
-            # Total
-            return 0.6 * weighted_loss + 0.3 * delta_loss + 0.1 * vol_loss
-        
-        best_val_loss = float('inf')
-        patience_counter = 0
-        
-        logger.info("Training...")
-        for epoch in range(1, epochs + 1):
-            # Training
-            model.train()
-            train_loss = 0
+            X_train, y_delta_train, y_vol_train = X[:train_idx], y_delta[:train_idx], y_vol[:train_idx]
+            X_val, y_delta_val, y_vol_val = X[train_idx:val_idx], y_delta[train_idx:val_idx], y_vol[train_idx:val_idx]
+            X_test, y_delta_test, y_vol_test = X[val_idx:], y_delta[val_idx:], y_vol[val_idx:]
             
-            for X_batch, y_delta_batch, y_vol_batch in train_loader:
-                X_batch = X_batch.to(self.device)
-                y_delta_batch = y_delta_batch.to(self.device)
-                y_vol_batch = y_vol_batch.to(self.device)
+            # Create datasets
+            train_dataset = TensorDataset(
+                torch.FloatTensor(X_train),
+                torch.FloatTensor(y_delta_train),
+                torch.FloatTensor(y_vol_train)
+            )
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            
+            val_dataset = TensorDataset(
+                torch.FloatTensor(X_val),
+                torch.FloatTensor(y_delta_val),
+                torch.FloatTensor(y_vol_val)
+            )
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+            
+            # Model
+            model = MultiScaleLSTMV5(input_size=X.shape[2]).to(self.device)
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, 
+                                                              patience=15, verbose=False)
+            
+            # Loss with weights
+            def combined_loss(pred_delta, pred_vol, true_delta, true_vol, uncertainty):
+                # Regression loss on delta
+                delta_loss = torch.mean((pred_delta - true_delta) ** 2)
                 
-                pred_delta, pred_vol = model(X_batch)
-                loss = combined_loss(pred_delta, pred_vol, y_delta_batch, y_vol_batch, pred_vol)
+                # Uncertainty-weighted loss
+                weighted_loss = torch.mean(((pred_delta - true_delta) ** 2) / (2 * uncertainty ** 2 + 1e-4))
                 
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                # Volatility loss
+                vol_loss = torch.mean((pred_vol - true_vol) ** 2)
                 
-                train_loss += loss.item()
+                # Total
+                return 0.6 * weighted_loss + 0.3 * delta_loss + 0.1 * vol_loss
             
-            train_loss /= len(train_loader)
+            best_val_loss = float('inf')
+            patience_counter = 0
             
-            # Validation
-            model.eval()
-            val_loss = 0
-            with torch.no_grad():
-                for X_batch, y_delta_batch, y_vol_batch in val_loader:
+            logger.info("Training...")
+            for epoch in range(1, epochs + 1):
+                # Training
+                model.train()
+                train_loss = 0
+                
+                for X_batch, y_delta_batch, y_vol_batch in train_loader:
                     X_batch = X_batch.to(self.device)
                     y_delta_batch = y_delta_batch.to(self.device)
                     y_vol_batch = y_vol_batch.to(self.device)
                     
                     pred_delta, pred_vol = model(X_batch)
                     loss = combined_loss(pred_delta, pred_vol, y_delta_batch, y_vol_batch, pred_vol)
-                    val_loss += loss.item()
+                    
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    
+                    train_loss += loss.item()
+                
+                train_loss /= len(train_loader)
+                
+                # Validation
+                model.eval()
+                val_loss = 0
+                with torch.no_grad():
+                    for X_batch, y_delta_batch, y_vol_batch in val_loader:
+                        X_batch = X_batch.to(self.device)
+                        y_delta_batch = y_delta_batch.to(self.device)
+                        y_vol_batch = y_vol_batch.to(self.device)
+                        
+                        pred_delta, pred_vol = model(X_batch)
+                        loss = combined_loss(pred_delta, pred_vol, y_delta_batch, y_vol_batch, pred_vol)
+                        val_loss += loss.item()
+                
+                val_loss /= len(val_loader)
+                scheduler.step(val_loss)
+                
+                if epoch % 20 == 0:
+                    print(f"  Epoch {epoch:3d}: Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
+                    logger.info(f"Epoch {epoch:3d}: Train={train_loss:.6f}, Val={val_loss:.6f}")
+                
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save using PathConfig
+                    model_path = self.paths.get_model_weights_file(symbol, version='v5')
+                    torch.save(model.state_dict(), model_path)
+                else:
+                    patience_counter += 1
+                    if patience_counter >= 25:
+                        print(f"  Early stopping at epoch {epoch}")
+                        logger.info(f"Early stopping at epoch {epoch}")
+                        break
             
-            val_loss /= len(val_loader)
-            scheduler.step(val_loss)
+            # Test evaluation
+            model.eval()
+            with torch.no_grad():
+                X_test_t = torch.FloatTensor(X_test).to(self.device)
+                y_pred_delta, y_pred_vol = model(X_test_t)
+                y_pred_delta = y_pred_delta.cpu().numpy()
+                y_pred_vol = y_pred_vol.cpu().numpy()
             
-            if epoch % 20 == 0:
-                logger.info(f"Epoch {epoch:3d}: Train={train_loss:.6f}, Val={val_loss:.6f}")
+            # Inverse transform
+            y_delta_test_orig = scaler_delta.inverse_transform(y_delta_test)
+            y_pred_delta_orig = scaler_delta.inverse_transform(y_pred_delta)
             
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                torch.save(model.state_dict(), 
-                          os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'models', 'weights',
-                                      f'{symbol}_1h_v5_lstm.pth'))
-            else:
-                patience_counter += 1
-                if patience_counter >= 25:
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
+            # Calculate metrics on original scale
+            mape = mean_absolute_percentage_error(y_delta_test_orig, y_pred_delta_orig)
+            mae = mean_absolute_error(y_delta_test_orig, y_pred_delta_orig)
+            rmse = np.sqrt(mean_squared_error(y_delta_test_orig, y_pred_delta_orig))
+            
+            logger.info(f"\nTest Results for {symbol}:")
+            logger.info(f"  MAPE (Delta): {mape*100:.2f}%")
+            logger.info(f"  MAE: ${mae:.4f}")
+            logger.info(f"  RMSE: ${rmse:.4f}")
+            
+            print(f"  MAPE: {mape*100:.2f}%, MAE: ${mae:.4f}, RMSE: ${rmse:.4f}")
+            
+            # Save config using PathConfig
+            config = {
+                'lstm': {'hidden_size': 192, 'num_layers': 2},
+                'training': {'epochs': epoch, 'batch_size': batch_size, 'lr': learning_rate},
+                'metrics': {'mape': float(mape), 'mae': float(mae), 'rmse': float(rmse)}
+            }
+            
+            config_path = self.paths.get_model_config_file(symbol, version='v5')
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            logger.info(f"Model saved to: {self.paths.get_model_weights_file(symbol, version='v5')}")
+            return mape
         
-        # Test evaluation
-        model.eval()
-        with torch.no_grad():
-            X_test_t = torch.FloatTensor(X_test).to(self.device)
-            y_pred_delta, y_pred_vol = model(X_test_t)
-            y_pred_delta = y_pred_delta.cpu().numpy()
-            y_pred_vol = y_pred_vol.cpu().numpy()
-        
-        # Inverse transform
-        y_delta_test_orig = scaler_delta.inverse_transform(y_delta_test)
-        y_pred_delta_orig = scaler_delta.inverse_transform(y_pred_delta)
-        
-        # Calculate metrics on original scale
-        mape = mean_absolute_percentage_error(y_delta_test_orig, y_pred_delta_orig)
-        mae = mean_absolute_error(y_delta_test_orig, y_pred_delta_orig)
-        rmse = np.sqrt(mean_squared_error(y_delta_test_orig, y_pred_delta_orig))
-        
-        logger.info(f"\nTest Results for {symbol}:")
-        logger.info(f"  MAPE (Delta): {mape*100:.2f}%")
-        logger.info(f"  MAE: ${mae:.4f}")
-        logger.info(f"  RMSE: ${rmse:.4f}")
-        
-        # Save config
-        config = {
-            'lstm': {'hidden_size': 192, 'num_layers': 2},
-            'training': {'epochs': epoch, 'batch_size': batch_size, 'lr': learning_rate},
-            'metrics': {'mape': float(mape), 'mae': float(mae), 'rmse': float(rmse)}
-        }
-        
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'models', 'config',
-                                   f'{symbol}_v5_config.json')
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
-        
-        return mape
+        except Exception as e:
+            logger.error(f"Error training {symbol}: {str(e)}")
+            print(f"  ERROR: {str(e)}")
+            return None
 
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('count', type=int, help='Number of symbols to train')
-    parser.add_argument('--device', default='cuda', choices=['cpu', 'cuda'])
+    parser = argparse.ArgumentParser(description='V5 Enhanced Model Training')
+    parser.add_argument('count', type=int, nargs='?', default=2, help='Number of symbols to train')
+    parser.add_argument('--device', default='cuda', choices=['cpu', 'cuda'], help='Device to use')
+    parser.add_argument('--symbols', nargs='+', help='Specific symbols')
     args = parser.parse_args()
     
-    # Default symbols
-    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT', 'SOLUSDT', 
-               'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LINKUSDT', 'LTCUSDT', 'NEARUSDT',
-               'ATOMUSDT', 'UNIUSDT', 'APTUSDT'][:args.count]
+    print("\n" + "="*70)
+    print("V5 ENHANCED MODEL TRAINING")
+    print("="*70)
     
     trainer = V5EnhancedTrainer(device=args.device)
-    mapes = []
+    trainer.paths.print_summary()
     
+    # Determine symbols
+    if args.symbols:
+        symbols = args.symbols
+    else:
+        all_symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT', 'SOLUSDT', 
+                       'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LINKUSDT', 'LTCUSDT', 'NEARUSDT',
+                       'ATOMUSDT', 'UNIUSDT', 'APTUSDT']
+        symbols = all_symbols[:args.count]
+    
+    print(f"Training {len(symbols)} symbols: {', '.join(symbols)}")
+    print("="*70 + "\n")
+    
+    mapes = []
     for idx, symbol in enumerate(symbols, 1):
         mape = trainer.train(symbol, num_symbols=len(symbols), symbol_idx=idx)
-        mapes.append(mape)
+        if mape is not None:
+            mapes.append(mape)
     
-    logger.info(f"\n{'='*60}")
-    logger.info(f"V5 Training Complete")
-    logger.info(f"Average MAPE: {np.mean(mapes)*100:.2f}%")
-    logger.info(f"Best: {np.min(mapes)*100:.2f}% | Worst: {np.max(mapes)*100:.2f}%")
+    print("\n" + "="*70)
+    print("V5 TRAINING COMPLETE")
+    print("="*70)
+    if mapes:
+        print(f"Average MAPE: {np.mean(mapes)*100:.2f}%")
+        print(f"Best: {np.min(mapes)*100:.2f}% | Worst: {np.max(mapes)*100:.2f}%")
+    print(f"Models saved to: {trainer.paths.models_weights_dir}")
+    print("="*70 + "\n")

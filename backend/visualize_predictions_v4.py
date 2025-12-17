@@ -28,6 +28,27 @@ class V4Visualizer:
         self.device = device
         self.trainer = V4AdaptiveTrainer(device=device)
     
+    def _get_model_config(self, symbol: str):
+        """Get model configuration from saved config file"""
+        config_dir = os.path.join(os.path.dirname(__file__), 'models', 'config')
+        config_path = os.path.join(config_dir, f'{symbol}_v4_config.json')
+        
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        
+        # Default config if not found
+        return {
+            'lstm': {
+                'hidden_size': 192,
+                'num_layers': 2,
+                'dropout': 0.2
+            }
+        }
+    
     def generate_predictions(self, symbol: str, timeframe: str = '1h'):
         """Generate predictions for a symbol"""
         print(f"\nGenerating predictions for {symbol}...")
@@ -48,21 +69,52 @@ class V4Visualizer:
             y_train, y_val, y_test = y[:train_idx], y[train_idx:val_idx], y[val_idx:]
             
             # Load LSTM model
-            models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+            models_dir = os.path.join(os.path.dirname(__file__), 'models', 'weights')
             lstm_path = os.path.join(models_dir, f'{symbol}_1h_v4_lstm.pth')
+            
             if not os.path.exists(lstm_path):
                 print(f"LSTM model not found: {lstm_path}")
                 return None
             
-            # Create and load LSTM
+            # Get config to know model architecture
+            config = self._get_model_config(symbol)
+            lstm_config = config.get('lstm', {})
+            
+            hidden_size = lstm_config.get('hidden_size', 192)
+            num_layers = lstm_config.get('num_layers', 2)
+            dropout = lstm_config.get('dropout', 0.2)
+            
+            # Create model with correct architecture
             model = LSTMWithWarmup(
                 input_size=X_train.shape[2],
-                hidden_size=192,
-                num_layers=2,
-                dropout=0.2
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dropout=dropout
             ).to(self.device)
             
-            model.load_state_dict(torch.load(lstm_path, map_location=self.device))
+            # Load weights
+            try:
+                model.load_state_dict(torch.load(lstm_path, map_location=self.device))
+            except RuntimeError as e:
+                print(f"Model architecture mismatch for {symbol}:")
+                print(f"  Expected: hidden_size={hidden_size}, num_layers={num_layers}")
+                print(f"  Error: {str(e)[:200]}...")
+                print(f"  Using fallback architecture...")
+                
+                # Try with default architecture if config doesn't match
+                model = LSTMWithWarmup(
+                    input_size=X_train.shape[2],
+                    hidden_size=256,
+                    num_layers=3,
+                    dropout=0.15
+                ).to(self.device)
+                
+                try:
+                    model.load_state_dict(torch.load(lstm_path, map_location=self.device))
+                except:
+                    print(f"Failed with fallback architecture too. Skipping {symbol}")
+                    return None
+            
             model.eval()
             
             # Extract LSTM features
@@ -101,9 +153,7 @@ class V4Visualizer:
             }
         
         except Exception as e:
-            print(f"Error generating predictions: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error generating predictions for {symbol}: {str(e)}")
             return None
     
     def _extract_lstm_features(self, model, X):
@@ -122,6 +172,7 @@ class V4Visualizer:
             backend_dir = os.path.dirname(__file__)
             save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
         
+        save_dir = os.path.normpath(os.path.abspath(save_dir))
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         symbol = results['symbol']
@@ -190,6 +241,7 @@ class V4Visualizer:
             backend_dir = os.path.dirname(__file__)
             save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
         
+        save_dir = os.path.normpath(os.path.abspath(save_dir))
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         results_list = []

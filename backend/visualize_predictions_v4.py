@@ -27,10 +27,14 @@ class V4Visualizer:
     def __init__(self, device='cpu'):
         self.device = device
         self.trainer = V4AdaptiveTrainer(device=device)
+        # Get absolute paths
+        self.backend_dir = os.path.dirname(os.path.abspath(__file__))
+        self.models_dir = os.path.join(self.backend_dir, 'models', 'weights')
+        self.results_dir = os.path.join(self.backend_dir, 'results', 'visualizations')
     
     def _get_model_config(self, symbol: str):
         """Get model configuration from saved config file"""
-        config_dir = os.path.join(os.path.dirname(__file__), 'models', 'config')
+        config_dir = os.path.join(self.backend_dir, 'models', 'config')
         config_path = os.path.join(config_dir, f'{symbol}_v4_config.json')
         
         if os.path.exists(config_path):
@@ -69,11 +73,10 @@ class V4Visualizer:
             y_train, y_val, y_test = y[:train_idx], y[train_idx:val_idx], y[val_idx:]
             
             # Load LSTM model
-            models_dir = os.path.join(os.path.dirname(__file__), 'models', 'weights')
-            lstm_path = os.path.join(models_dir, f'{symbol}_1h_v4_lstm.pth')
+            lstm_path = os.path.join(self.models_dir, f'{symbol}_1h_v4_lstm.pth')
             
             if not os.path.exists(lstm_path):
-                print(f"LSTM model not found: {lstm_path}")
+                print(f"  Model not found: {lstm_path}")
                 return None
             
             # Get config to know model architecture
@@ -96,10 +99,7 @@ class V4Visualizer:
             try:
                 model.load_state_dict(torch.load(lstm_path, map_location=self.device))
             except RuntimeError as e:
-                print(f"Model architecture mismatch for {symbol}:")
-                print(f"  Expected: hidden_size={hidden_size}, num_layers={num_layers}")
-                print(f"  Error: {str(e)[:200]}...")
-                print(f"  Using fallback architecture...")
+                print(f"  Architecture mismatch, trying fallback...")
                 
                 # Try with default architecture if config doesn't match
                 model = LSTMWithWarmup(
@@ -112,7 +112,7 @@ class V4Visualizer:
                 try:
                     model.load_state_dict(torch.load(lstm_path, map_location=self.device))
                 except:
-                    print(f"Failed with fallback architecture too. Skipping {symbol}")
+                    print(f"  Fallback also failed. Skipping {symbol}")
                     return None
             
             model.eval()
@@ -122,9 +122,9 @@ class V4Visualizer:
             
             # Load XGBoost model
             import xgboost as xgb
-            xgb_path = os.path.join(models_dir, f'{symbol}_1h_v4_xgb.json')
+            xgb_path = os.path.join(self.models_dir, f'{symbol}_1h_v4_xgb.json')
             if not os.path.exists(xgb_path):
-                print(f"XGBoost model not found: {xgb_path}")
+                print(f"  XGBoost model not found: {xgb_path}")
                 return None
             
             xgb_model = xgb.XGBRegressor()
@@ -153,7 +153,7 @@ class V4Visualizer:
             }
         
         except Exception as e:
-            print(f"Error generating predictions for {symbol}: {str(e)}")
+            print(f"  Error: {str(e)[:100]}")
             return None
     
     def _extract_lstm_features(self, model, X):
@@ -165,14 +165,11 @@ class V4Visualizer:
             features = lstm_out[:, -1, :].cpu().numpy()
         return np.ascontiguousarray(features.astype(np.float32))
     
-    def plot_predictions(self, results, save_dir='backend/results/visualizations'):
+    def plot_predictions(self, results, save_dir=None):
         """Plot actual vs predicted prices"""
-        # Handle relative paths
-        if not os.path.isabs(save_dir):
-            backend_dir = os.path.dirname(__file__)
-            save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
+        if save_dir is None:
+            save_dir = self.results_dir
         
-        save_dir = os.path.normpath(os.path.abspath(save_dir))
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         symbol = results['symbol']
@@ -229,19 +226,16 @@ class V4Visualizer:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         save_path = os.path.join(save_dir, f'{symbol}_predictions_{timestamp}.png')
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Visualization saved: {save_path}")
+        print(f"  Saved: {save_path}")
         plt.close()
         
         return save_path
     
-    def plot_multiple_symbols(self, symbols, save_dir='backend/results/visualizations'):
+    def plot_multiple_symbols(self, symbols, save_dir=None):
         """Plot predictions for multiple symbols"""
-        # Handle relative paths
-        if not os.path.isabs(save_dir):
-            backend_dir = os.path.dirname(__file__)
-            save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
+        if save_dir is None:
+            save_dir = self.results_dir
         
-        save_dir = os.path.normpath(os.path.abspath(save_dir))
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         results_list = []
@@ -332,11 +326,6 @@ class V4Visualizer:
 if __name__ == '__main__':
     # Initialize visualizer
     visualizer = V4Visualizer(device='cpu')
-    
-    # Single symbol visualization
-    # results = visualizer.generate_predictions('BTCUSDT')
-    # if results:
-    #     visualizer.plot_predictions(results)
     
     # Multiple symbols
     symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT']

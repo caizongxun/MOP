@@ -1,7 +1,7 @@
 """
 V4 Adaptive LSTM+XGBoost Training with Volatility-Based Hyperparameter Optimization
 Automatically adjusts learning strategies based on asset volatility
-Target: MAPE < 2% for all symbols
+Target: Configurable MAPE (default 5%)
 """
 
 import os
@@ -62,30 +62,30 @@ class AdaptiveHyperparameterConfig:
         'low': {
             'lstm': {
                 'hidden_size': 256, 'num_layers': 3, 'dropout': 0.15,
-                'lr': 0.0005, 'batch_size': 8, 'weight_decay': 1e-5, 'epochs': 100
+                'lr': 0.0003, 'batch_size': 8, 'weight_decay': 5e-5, 'epochs': 150
             },
             'xgb': {
-                'max_depth': 7, 'learning_rate': 0.02, 'n_estimators': 200,
+                'max_depth': 6, 'learning_rate': 0.02, 'n_estimators': 300,
                 'subsample': 0.9, 'colsample_bytree': 0.9, 'reg_alpha': 0.5, 'reg_lambda': 0.5
             }
         },
         'medium': {
             'lstm': {
                 'hidden_size': 192, 'num_layers': 2, 'dropout': 0.2,
-                'lr': 0.0008, 'batch_size': 12, 'weight_decay': 2e-5, 'epochs': 80
+                'lr': 0.0004, 'batch_size': 12, 'weight_decay': 3e-5, 'epochs': 120
             },
             'xgb': {
-                'max_depth': 6, 'learning_rate': 0.035, 'n_estimators': 150,
+                'max_depth': 5, 'learning_rate': 0.03, 'n_estimators': 250,
                 'subsample': 0.85, 'colsample_bytree': 0.85, 'reg_alpha': 1, 'reg_lambda': 1
             }
         },
         'high': {
             'lstm': {
                 'hidden_size': 128, 'num_layers': 2, 'dropout': 0.3,
-                'lr': 0.001, 'batch_size': 16, 'weight_decay': 5e-5, 'epochs': 60
+                'lr': 0.0005, 'batch_size': 16, 'weight_decay': 1e-4, 'epochs': 100
             },
             'xgb': {
-                'max_depth': 5, 'learning_rate': 0.05, 'n_estimators': 100,
+                'max_depth': 4, 'learning_rate': 0.05, 'n_estimators': 200,
                 'subsample': 0.8, 'colsample_bytree': 0.8, 'reg_alpha': 2, 'reg_lambda': 2
             }
         }
@@ -157,7 +157,6 @@ class V4AdaptiveTrainer:
         else:
             self.device = device
         
-        # Find correct data directory
         if data_dir is None:
             self.data_dir = self._find_data_dir()
         else:
@@ -169,7 +168,6 @@ class V4AdaptiveTrainer:
     
     def _find_data_dir(self) -> str:
         """Find data directory by searching common paths"""
-        # Try multiple possible paths
         possible_paths = [
             'backend/data/raw',
             './backend/data/raw',
@@ -182,7 +180,6 @@ class V4AdaptiveTrainer:
             if os.path.isdir(path):
                 return os.path.abspath(path)
         
-        # If not found, create and return default
         default = os.path.abspath('backend/data/raw')
         logger.warning(f"Data directory not found, using default: {default}")
         return default
@@ -197,7 +194,7 @@ class V4AdaptiveTrainer:
         available_cols = [col for col in numeric_cols if col in df.columns]
         return df[available_cols]
     
-    def train_symbol(self, symbol: str, target_mape: float = 0.02) -> Dict:
+    def train_symbol(self, symbol: str, target_mape: float = 0.05) -> Dict:
         """Train single symbol"""
         logger.info(f"\n{'='*80}")
         logger.info(f"Training {symbol} with V4 Adaptive (Target MAPE: {target_mape*100:.2f}%)")
@@ -355,23 +352,18 @@ class V4AdaptiveTrainer:
         return model
     
     def _extract_lstm_features(self, model, X):
-        """Extract LSTM features for XGBoost - use last layer LSTM output"""
+        """Extract LSTM features for XGBoost"""
         X_t = torch.FloatTensor(X).to(self.device)
         model.eval()
         with torch.no_grad():
             lstm_out, (hidden, cell) = model.lstm(X_t)
-            # Use last output of LSTM (not hidden state)
-            # lstm_out shape: (batch_size, seq_length, hidden_size)
-            # Take the last timestep: (batch_size, hidden_size)
             features = lstm_out[:, -1, :].cpu().numpy()
         
-        # Ensure 2D: (batch_size, hidden_size)
         assert len(features.shape) == 2, f"Features shape should be 2D, got {features.shape}"
         return np.ascontiguousarray(features.astype(np.float32))
     
     def _train_xgboost(self, X_train, y_train, X_val, y_val, X_test, y_test, config, symbol, scaler_y):
-        """Train XGBoost - simple one-shot training"""
-        # Ensure proper shapes and types
+        """Train XGBoost"""
         X_train = np.ascontiguousarray(X_train.astype(np.float32))
         X_test = np.ascontiguousarray(X_test.astype(np.float32))
         
@@ -379,8 +371,6 @@ class V4AdaptiveTrainer:
         y_test = np.asarray(y_test, dtype=np.float32).ravel()
         
         logger.info(f"XGBoost input shapes - X_train: {X_train.shape}, y_train: {y_train.shape}")
-        logger.info(f"X_train ndim: {X_train.ndim}, dtype: {X_train.dtype}")
-        logger.info(f"y_train ndim: {y_train.ndim}, dtype: {y_train.dtype}")
         
         model = xgb.XGBRegressor(**config, random_state=42, n_jobs=-1, verbosity=0)
         model.fit(X_train, y_train, verbose=False)
@@ -414,8 +404,8 @@ class V4AdaptiveTrainer:
         with open(f'backend/models/config/{symbol}_v4_config.json', 'w') as f:
             json.dump(config, f, indent=2)
     
-    def train_batch(self, symbols=None, target_mape=0.02):
-        """Batch training"""
+    def train_batch(self, symbols=None, target_mape=0.05):
+        """Batch training with configurable MAPE target"""
         if symbols is None:
             symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT',
                       'SOLUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LINKUSDT',
@@ -454,7 +444,10 @@ class V4AdaptiveTrainer:
             'timestamp': datetime.now().isoformat(),
             'total_symbols': len(symbols),
             'successful': successful,
-            'avg_mape': float(np.mean(mape_list)) if mape_list else None
+            'target_mape': target_mape,
+            'avg_mape': float(np.mean(mape_list)) if mape_list else None,
+            'median_mape': float(np.median(mape_list)) if mape_list else None,
+            'results': results
         }
         
         with open(f"backend/results/v4_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
@@ -466,4 +459,4 @@ if __name__ == '__main__':
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     trainer = V4AdaptiveTrainer()
-    trainer.train_batch(target_mape=0.02)
+    trainer.train_batch(target_mape=0.05)

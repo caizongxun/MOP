@@ -2,6 +2,7 @@
 """
 Quick Visualizer for V5 Adaptive Predictions
 Generates plots of actual vs predicted prices with error analysis
+Uses unified PathConfig for consistent path handling
 """
 
 import os
@@ -23,6 +24,7 @@ from sklearn.metrics import mean_absolute_percentage_error, mean_absolute_error,
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from path_config import PathConfig
 from train_v5_enhanced import FeatureEngineerV5, MultiScaleLSTMV5
 
 class V5Visualizer:
@@ -31,37 +33,12 @@ class V5Visualizer:
     def __init__(self, device='cpu'):
         self.device = torch.device(device)
         self.feature_calc = FeatureEngineerV5()
-        self.backend_dir = os.path.dirname(os.path.abspath(__file__))
-        self.models_dir = self.find_models_dir()
-        self.results_dir = self.find_results_dir()
-        print(f"Models dir: {self.models_dir}")
-        print(f"Results dir: {self.results_dir}")
-    
-    def find_models_dir(self):
-        """Find models directory"""
-        # Try root level first
-        root_models = os.path.join(os.path.dirname(self.backend_dir), 'models', 'weights')
-        if os.path.exists(root_models):
-            return root_models
-        # Try backend level
-        backend_models = os.path.join(self.backend_dir, 'models', 'weights')
-        if os.path.exists(backend_models):
-            return backend_models
-        return root_models
-    
-    def find_results_dir(self):
-        """Find results directory"""
-        root_results = os.path.join(os.path.dirname(self.backend_dir), 'results', 'visualizations')
-        os.makedirs(root_results, exist_ok=True)
-        return root_results
+        self.paths = PathConfig()
+        print(f"Using unified path configuration")
     
     def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
-        """Load data"""
-        root_dir = os.path.dirname(self.backend_dir)
-        data_path = os.path.join(root_dir, 'backend', 'data', 'raw', f'{symbol}_{timeframe}.csv')
-        
-        if not os.path.exists(data_path):
-            data_path = os.path.join(self.backend_dir, 'data', 'raw', f'{symbol}_{timeframe}.csv')
+        """Load data using unified path config"""
+        data_path = self.paths.get_data_file(symbol, timeframe)
         
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Data not found: {data_path}")
@@ -96,11 +73,12 @@ class V5Visualizer:
             scaler_X = StandardScaler()
             X_scaled = scaler_X.fit_transform(X.reshape(-1, X.shape[-1])).reshape(X.shape)
             
-            # Load model
-            model_path = os.path.join(self.models_dir, f'{symbol}_1h_v5_lstm.pth')
+            # Load model using unified path config
+            model_path = self.paths.get_model_weights_file(symbol, timeframe, version='v5')
             
             if not os.path.exists(model_path):
                 print(f"  Model not found: {model_path}")
+                print(f"  Path config: {self.paths.models_weights_dir}")
                 return None
             
             model = MultiScaleLSTMV5(input_size=X.shape[2]).to(self.device)
@@ -120,7 +98,6 @@ class V5Visualizer:
                 pred_uncertainty = pred_uncertainty.cpu().numpy().ravel()
             
             # Reconstruct prices from deltas
-            # Start from known price at lookback position
             pred_prices = np.zeros(len(close_prices))
             pred_prices[:lookback] = close_prices[:lookback]
             
@@ -162,11 +139,9 @@ class V5Visualizer:
             print(f"  Error: {str(e)[:100]}")
             return None
     
-    def plot_predictions(self, results, save_dir=None):
-        """Plot actual vs predicted prices"""
-        if save_dir is None:
-            save_dir = self.results_dir
-        
+    def plot_predictions(self, results):
+        """Plot actual vs predicted prices using unified path config"""
+        save_dir = self.paths.results_visualizations_dir
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         symbol = results['symbol']
@@ -234,18 +209,13 @@ class V5Visualizer:
         
         return save_path
     
-    def plot_multiple_symbols(self, symbols, save_dir=None):
+    def plot_multiple_symbols(self, symbols):
         """Plot predictions for multiple symbols"""
-        if save_dir is None:
-            save_dir = self.results_dir
-        
-        Path(save_dir).mkdir(parents=True, exist_ok=True)
-        
         results_list = []
         for symbol in symbols:
             results = self.generate_predictions(symbol)
             if results:
-                self.plot_predictions(results, save_dir)
+                self.plot_predictions(results)
                 results_list.append({
                     'symbol': symbol,
                     'mape': results['mape'],
@@ -255,12 +225,14 @@ class V5Visualizer:
         
         # Create summary table
         if results_list:
-            self.plot_summary_table(results_list, save_dir)
+            self.plot_summary_table(results_list)
         
         return results_list
     
-    def plot_summary_table(self, results_list, save_dir):
+    def plot_summary_table(self, results_list):
         """Create summary table of all predictions"""
+        save_dir = self.paths.results_visualizations_dir
+        
         df = pd.DataFrame(results_list)
         df['mape'] = df['mape'] * 100
         
@@ -289,13 +261,13 @@ class V5Visualizer:
         
         for _, row in df.iterrows():
             if row['mape'] <= 3:
-                row_color = ['#90EE90']  # Light green
+                row_color = ['#90EE90']
             elif row['mape'] <= 5:
-                row_color = ['#FFD700']  # Gold
+                row_color = ['#FFD700']
             elif row['mape'] <= 8:
-                row_color = ['#FFA500']  # Orange
+                row_color = ['#FFA500']
             else:
-                row_color = ['#FF6B6B']  # Light red
+                row_color = ['#FF6B6B']
             
             row_color = row_color * 4
             colors.append(row_color)
@@ -308,7 +280,6 @@ class V5Visualizer:
         table.set_fontsize(10)
         table.scale(1, 2)
         
-        # Style header
         for i in range(4):
             table[(0, i)].set_text_props(weight='bold', color='white')
         
@@ -334,13 +305,16 @@ def main():
     
     args = parser.parse_args()
     
-    print("\n" + "="*60)
-    print("V5 Adaptive Predictions Visualizer")
-    print("="*60)
+    print("\n" + "="*70)
+    print("V5 ADAPTIVE PREDICTIONS VISUALIZER")
+    print("="*70)
     print(f"Device: {args.device}")
     
-    # Create visualizer
+    # Create visualizer (this initializes PathConfig)
     visualizer = V5Visualizer(device=args.device)
+    
+    # Print path configuration
+    visualizer.paths.print_summary()
     
     # Determine symbols
     if args.symbols:
@@ -350,27 +324,27 @@ def main():
                   'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LINKUSDT', 'LTCUSDT', 'NEARUSDT',
                   'ATOMUSDT', 'UNIUSDT', 'APTUSDT']
     else:
-        symbols = ['BTCUSDT', 'ETHUSDT']  # Default
+        symbols = ['BTCUSDT', 'ETHUSDT']
     
-    print(f"Output: {visualizer.results_dir}")
     print(f"Processing {len(symbols)} symbols: {', '.join(symbols[:5])}...")
-    print("="*60)
+    print("="*70)
     
     # Generate visualizations
     results_list = visualizer.plot_multiple_symbols(symbols)
     
-    print("\n" + "="*60)
-    print("Visualization Complete!")
-    print("="*60)
+    print("\n" + "="*70)
+    print("VISUALIZATION COMPLETE!")
+    print("="*70)
     
     if results_list:
         print(f"\nSuccessfully visualized {len(results_list)} symbols")
         for result in results_list:
             print(f"  {result['symbol']}: MAPE={result['mape']*100:.2f}%")
-        print(f"\nResults saved to: {visualizer.results_dir}")
+        print(f"\nResults saved to: {visualizer.paths.results_visualizations_dir}")
     else:
         print("\nNo visualizations were created.")
-        print(f"Please ensure V5 models exist in: {visualizer.models_dir}")
+        print(f"Please ensure V5 models exist in: {visualizer.paths.models_weights_dir}")
+        print("Run training first: python train_v5.py 5 --device cuda")
 
 if __name__ == '__main__':
     main()

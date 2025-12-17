@@ -48,7 +48,8 @@ class V4Visualizer:
             y_train, y_val, y_test = y[:train_idx], y[train_idx:val_idx], y[val_idx:]
             
             # Load LSTM model
-            lstm_path = f'backend/models/weights/{symbol}_1h_v4_lstm.pth'
+            models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+            lstm_path = os.path.join(models_dir, f'{symbol}_1h_v4_lstm.pth')
             if not os.path.exists(lstm_path):
                 print(f"LSTM model not found: {lstm_path}")
                 return None
@@ -69,7 +70,7 @@ class V4Visualizer:
             
             # Load XGBoost model
             import xgboost as xgb
-            xgb_path = f'backend/models/weights/{symbol}_1h_v4_xgb.json'
+            xgb_path = os.path.join(models_dir, f'{symbol}_1h_v4_xgb.json')
             if not os.path.exists(xgb_path):
                 print(f"XGBoost model not found: {xgb_path}")
                 return None
@@ -101,6 +102,8 @@ class V4Visualizer:
         
         except Exception as e:
             print(f"Error generating predictions: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _extract_lstm_features(self, model, X):
@@ -114,6 +117,11 @@ class V4Visualizer:
     
     def plot_predictions(self, results, save_dir='backend/results/visualizations'):
         """Plot actual vs predicted prices"""
+        # Handle relative paths
+        if not os.path.isabs(save_dir):
+            backend_dir = os.path.dirname(__file__)
+            save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
+        
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         symbol = results['symbol']
@@ -171,11 +179,17 @@ class V4Visualizer:
         save_path = os.path.join(save_dir, f'{symbol}_predictions_{timestamp}.png')
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Visualization saved: {save_path}")
+        plt.close()
         
         return save_path
     
     def plot_multiple_symbols(self, symbols, save_dir='backend/results/visualizations'):
         """Plot predictions for multiple symbols"""
+        # Handle relative paths
+        if not os.path.isabs(save_dir):
+            backend_dir = os.path.dirname(__file__)
+            save_dir = os.path.join(backend_dir, '..', save_dir.replace('backend/', ''))
+        
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         
         results_list = []
@@ -256,6 +270,7 @@ class V4Visualizer:
         save_path = os.path.join(save_dir, f'summary_table_{timestamp}.png')
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Summary table saved: {save_path}")
+        plt.close()
         
         # Also save as CSV
         csv_path = os.path.join(save_dir, f'summary_results_{timestamp}.csv')

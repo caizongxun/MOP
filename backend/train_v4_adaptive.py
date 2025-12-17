@@ -167,28 +167,43 @@ class V4AdaptiveTrainer:
         logger.info(f"Data directory: {self.data_dir}")
     
     def _find_data_dir(self) -> str:
-        """Find data directory by searching common paths"""
+        """Find data directory intelligently"""
+        # Get current working directory
+        cwd = os.getcwd()
+        
+        # Determine if we're in project root or backend directory
+        backend_parent = os.path.join(cwd, 'backend')
+        data_in_backend = os.path.join(backend_parent, 'data', 'raw')
+        data_in_cwd = os.path.join(cwd, 'data', 'raw')
+        
+        # Try multiple paths in order of preference
         possible_paths = [
-            'backend/data/raw',
-            './backend/data/raw',
-            '../backend/data/raw',
-            'data/raw',
-            './data/raw',
+            # If we're in project root
+            data_in_backend if os.path.exists(data_in_backend) else None,
+            # If we're in backend directory or subdirectory
+            os.path.join(cwd, 'data', 'raw'),
+            # Parent directory
+            os.path.join(os.path.dirname(cwd), 'data', 'raw'),
+            # Absolute reference from backend
+            os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'raw')),
         ]
         
         for path in possible_paths:
-            if os.path.isdir(path):
+            if path and os.path.isdir(path):
+                logger.info(f"Found data directory: {path}")
                 return os.path.abspath(path)
         
-        default = os.path.abspath('backend/data/raw')
-        logger.warning(f"Data directory not found, using default: {default}")
+        # If nothing found, return sensible default and warn
+        default = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'raw'))
+        logger.warning(f"Data directory not found. Expected at: {default}")
+        logger.warning(f"Current working directory: {cwd}")
         return default
     
     def load_data(self, symbol: str, timeframe: str = '1h') -> pd.DataFrame:
         """Load data"""
         filepath = os.path.join(self.data_dir, f"{symbol}_{timeframe}.csv")
         if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Data not found: {filepath}")
+            raise FileNotFoundError(f"Data not found: {filepath}\nSearched in: {self.data_dir}")
         df = pd.read_csv(filepath)
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         available_cols = [col for col in numeric_cols if col in df.columns]
@@ -339,14 +354,16 @@ class V4AdaptiveTrainer:
             
             if val_loss < best_val_loss:
                 best_val_loss, patience_counter = val_loss, 0
-                Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
-                torch.save(model.state_dict(), f'backend/models/weights/{symbol}_lstm_best.pth')
+                models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+                Path(models_dir).mkdir(parents=True, exist_ok=True)
+                torch.save(model.state_dict(), os.path.join(models_dir, f'{symbol}_lstm_best.pth'))
             else:
                 patience_counter += 1
             
             if patience_counter >= patience:
                 logger.info(f"Early stopping at epoch {epoch+1}")
-                model.load_state_dict(torch.load(f'backend/models/weights/{symbol}_lstm_best.pth'))
+                models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+                model.load_state_dict(torch.load(os.path.join(models_dir, f'{symbol}_lstm_best.pth')))
                 break
         
         return model
@@ -383,8 +400,9 @@ class V4AdaptiveTrainer:
         mae = mean_absolute_error(y_test_orig, y_test_pred_orig)
         rmse = np.sqrt(mean_squared_error(y_test_orig, y_test_pred_orig))
         
-        Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
-        model.save_model(f'backend/models/weights/{symbol}_1h_v4_xgb.json')
+        models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+        Path(models_dir).mkdir(parents=True, exist_ok=True)
+        model.save_model(os.path.join(models_dir, f'{symbol}_1h_v4_xgb.json'))
         
         logger.info(f"XGBoost Training completed")
         logger.info(f"Test MAPE: {mape*100:.4f}%")
@@ -395,13 +413,16 @@ class V4AdaptiveTrainer:
     
     def _save_models(self, lstm_model, symbol, category):
         """Save models and config"""
-        Path('backend/models/weights').mkdir(parents=True, exist_ok=True)
-        Path('backend/models/config').mkdir(parents=True, exist_ok=True)
-        torch.save(lstm_model.state_dict(), f'backend/models/weights/{symbol}_1h_v4_lstm.pth')
+        models_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'weights')
+        config_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'config')
+        Path(models_dir).mkdir(parents=True, exist_ok=True)
+        Path(config_dir).mkdir(parents=True, exist_ok=True)
+        
+        torch.save(lstm_model.state_dict(), os.path.join(models_dir, f'{symbol}_1h_v4_lstm.pth'))
         
         config = AdaptiveHyperparameterConfig.get_config(category)
         config['volatility_category'] = category
-        with open(f'backend/models/config/{symbol}_v4_config.json', 'w') as f:
+        with open(os.path.join(config_dir, f'{symbol}_v4_config.json'), 'w') as f:
             json.dump(config, f, indent=2)
     
     def train_batch(self, symbols=None, target_mape=0.05):
@@ -439,7 +460,8 @@ class V4AdaptiveTrainer:
             logger.info(f"Median MAPE: {np.median(mape_list)*100:.4f}%")
             logger.info(f"Range: {np.min(mape_list)*100:.4f}% - {np.max(mape_list)*100:.4f}%")
         
-        Path("backend/results").mkdir(parents=True, exist_ok=True)
+        results_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
+        Path(results_dir).mkdir(parents=True, exist_ok=True)
         summary = {
             'timestamp': datetime.now().isoformat(),
             'total_symbols': len(symbols),
@@ -450,7 +472,7 @@ class V4AdaptiveTrainer:
             'results': results
         }
         
-        with open(f"backend/results/v4_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
+        with open(os.path.join(results_dir, f"v4_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"), 'w') as f:
             json.dump(summary, f, indent=2)
 
 if __name__ == '__main__':

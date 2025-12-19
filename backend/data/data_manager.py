@@ -145,11 +145,6 @@ class DataManager:
         
         if not file_path.exists():
             logger.warning(f"No stored data for {symbol} ({timeframe}) at {file_path}")
-            # List available files for debugging
-            logger.debug(f"Available files in {self.data_dir}:")
-            if self.data_dir.exists():
-                for f in self.data_dir.glob("*.csv"):
-                    logger.debug(f"  - {f.name}")
             return None
         
         try:
@@ -272,10 +267,12 @@ class DataManager:
         self.save_data(symbol, timeframe, combined_data)
         return combined_data
     
-    def fetch_and_store_batch(self, symbol, timeframe='1h', total_limit=3000, batch_delay=1.0):
+    def fetch_and_store_batch(self, symbol, timeframe='1h', total_limit=3000, batch_delay=0.5):
         """
         Fetch multiple batches to accumulate more candles
         Makes multiple API calls to get more historical data
+        
+        CRITICAL FIX: Properly accumulate all batches
         
         Args:
             symbol: Cryptocurrency symbol
@@ -296,11 +293,13 @@ class DataManager:
         # Calculate how many batches needed
         num_batches = (total_limit + self.MAX_PER_REQUEST - 1) // self.MAX_PER_REQUEST
         
+        logger.info(f"Total batches needed: {num_batches}")
+        
         for batch_num in range(num_batches):
-            logger.info(f"\nBatch {batch_num + 1}/{num_batches}")
+            logger.info(f"\n[Batch {batch_num + 1}/{num_batches}] Fetching {self.MAX_PER_REQUEST} candles...")
             
             try:
-                # Fetch this batch
+                # Fetch this batch (fixed: always fetch MAX_PER_REQUEST)
                 batch_data = self.data_loader.fetch_ohlcv(
                     symbol,
                     timeframe=timeframe,
@@ -308,20 +307,22 @@ class DataManager:
                 )
                 
                 if batch_data is None or batch_data.empty:
-                    logger.warning(f"Batch {batch_num + 1} returned no data")
+                    logger.warning(f"Batch {batch_num + 1} returned no data - stopping")
                     break
+                
+                logger.info(f"Fetched {len(batch_data)} rows in batch {batch_num + 1}")
                 
                 # Set timestamp as index
                 if 'timestamp' in batch_data.columns:
                     batch_data = batch_data.set_index('timestamp')
                 
-                logger.info(f"Fetched {len(batch_data)} rows in batch {batch_num + 1}")
-                
                 # Append to accumulated data
                 if all_data is None or all_data.empty:
                     all_data = batch_data
+                    logger.info(f"First batch: {len(all_data)} rows total")
                 else:
                     all_data = self._append_new_data(symbol, timeframe, batch_data, all_data)
+                    logger.info(f"After batch {batch_num + 1}: {len(all_data)} rows total")
                 
                 # Delay before next batch to avoid rate limiting
                 if batch_num < num_batches - 1:
@@ -335,7 +336,7 @@ class DataManager:
         # Save final accumulated data
         if all_data is not None and not all_data.empty:
             self.save_data(symbol, timeframe, all_data)
-            logger.info(f"\nCompleted: {len(all_data)} total rows saved")
+            logger.info(f"\nCompleted: {len(all_data)} total rows saved for {symbol} ({timeframe})")
             return all_data
         else:
             logger.warning(f"No data accumulated for {symbol} ({timeframe})")
@@ -400,7 +401,7 @@ class DataManager:
         
         return results
     
-    def fetch_and_store_all_batch(self, timeframes=None, total_limit=3000, batch_delay=1.0):
+    def fetch_and_store_all_batch(self, timeframes=None, total_limit=3000, batch_delay=0.5):
         """
         Batch fetch for all cryptocurrencies to accumulate more candles
         

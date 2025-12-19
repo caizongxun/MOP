@@ -123,13 +123,16 @@ class CryptoDataLoader:
         """
         Fetch OHLCV data directly from Binance REST API
         
+        CRITICAL: Keep timestamps as numeric values (milliseconds)
+        Don't convert to datetime here - that's done in data_manager
+        
         Args:
             symbol: Trading pair (e.g., 'BTCUSDT')
             timeframe: Candle timeframe (default: '15m')
             limit: Number of candles to fetch (max 1000 per request)
         
         Returns:
-            DataFrame with OHLCV data
+            DataFrame with OHLCV data (timestamp as numeric milliseconds)
         """
         try:
             timeframe_map = {
@@ -160,16 +163,19 @@ class CryptoDataLoader:
                         'taker_buy_base', 'taker_buy_quote', 'ignore']
             )
             
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
+            # CRITICAL FIX: Keep timestamp as integer (milliseconds)
+            # Do NOT convert to datetime here - data_manager will handle conversion
+            df['timestamp'] = df['timestamp'].astype(int)
             df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
             
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            df.set_index('timestamp', inplace=True)
+            # Do NOT set timestamp as index here
             df = df.dropna()
             
             logger.info(f"Fetched {len(df)} candles for {symbol} ({timeframe}) from Binance API")
+            logger.debug(f"Sample timestamp: {df['timestamp'].iloc[0]} (raw milliseconds)")
             return df
             
         except requests.exceptions.RequestException as e:
@@ -183,6 +189,7 @@ class CryptoDataLoader:
     def fetch_ohlcv_ccxt(self, symbol, timeframe='15m', limit=1000):
         """
         Fetch OHLCV data using CCXT
+        CRITICAL: Keep timestamps as numeric values (milliseconds)
         """
         try:
             if '/' not in symbol:
@@ -193,10 +200,14 @@ class CryptoDataLoader:
                 ohlcv,
                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
             )
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
             
+            # CRITICAL FIX: Keep timestamp as integer (milliseconds)
+            # Do NOT convert to datetime here
+            df['timestamp'] = df['timestamp'].astype(int)
+            
+            # Do NOT set timestamp as index here
             logger.info(f"Fetched {len(df)} candles for {symbol} ({timeframe}) from CCXT")
+            logger.debug(f"Sample timestamp: {df['timestamp'].iloc[0]} (raw milliseconds)")
             return df
             
         except Exception as e:
@@ -206,6 +217,9 @@ class CryptoDataLoader:
     def fetch_ohlcv(self, symbol, timeframe='15m', limit=1000):
         """
         Fetch OHLCV data - tries Binance API first, falls back to CCXT
+        
+        Returns DataFrame with timestamp as numeric milliseconds (NOT datetime)
+        Timestamp conversion happens in data_manager.save_data()
         """
         if self.use_binance_api:
             return self.fetch_ohlcv_binance_api(symbol, timeframe, limit)
@@ -218,7 +232,7 @@ class CryptoDataLoader:
         Automatically skips indicators that don't have enough data
         
         Args:
-            df: DataFrame with OHLCV data
+            df: DataFrame with OHLCV data (timestamp as regular column, NOT index)
         
         Returns:
             DataFrame with technical indicators, list of available features

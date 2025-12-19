@@ -31,7 +31,7 @@ class DataManager:
     - Metadata tracking (last update, row count, etc.)
     """
     
-    # API限制：每次最多1000根，但可以循環多次
+    # API limit: max 1000 per request, but can loop multiple times
     MAX_PER_REQUEST = 1000
     
     @staticmethod
@@ -137,6 +137,7 @@ class DataManager:
     def get_stored_data(self, symbol, timeframe):
         """
         Load stored data for a symbol and timeframe (returns DataFrame)
+        FIXED: Now properly handles timestamps from Binance API (milliseconds)
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -158,16 +159,20 @@ class DataManager:
             return df
         except Exception as e:
             logger.error(f"Error loading data for {symbol} ({timeframe}): {str(e)}")
-            # Try reading without index
+            # Try reading without index and convert timestamp properly
             try:
                 df = pd.read_csv(file_path)
                 if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    # CRITICAL FIX: Binance API returns timestamps in milliseconds (unit='ms')
+                    # Do NOT use unit='s' as that would divide by 1000 and result in 1970 dates
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df = df.set_index('timestamp')
-                logger.info(f"Loaded {len(df)} rows (with conversion) for {symbol} ({timeframe})")
+                    logger.info(f"Loaded {len(df)} rows (with ms conversion) for {symbol} ({timeframe})")
+                else:
+                    logger.warning(f"No timestamp column found in {file_path}")
                 return df
             except Exception as e2:
-                logger.error(f"Failed to load data even with conversion: {str(e2)}")
+                logger.error(f"Failed to load data even with ms conversion: {str(e2)}")
                 return None
     
     def _append_new_data(self, symbol, timeframe, new_data, existing_data):

@@ -29,6 +29,8 @@ class DataManager:
     - Local storage for all cryptocurrencies
     - Support for multiple timeframes (15m, 1h)
     - Metadata tracking (last update, row count, etc.)
+    
+    IMPORTANT: Timestamps are now UTC datetime (from data_loader), not milliseconds
     """
     
     # API limit: max 1000 per request, but can loop multiple times
@@ -42,7 +44,7 @@ class DataManager:
         possible_paths = [
             Path(base_path),
             Path(os.getcwd()) / base_path,
-            Path(__file__).parent / 'raw',  # Current dir / raw
+            Path(__file__).parent / 'raw',
             Path(__file__).parent.parent.parent / base_path,
         ]
         
@@ -51,7 +53,6 @@ class DataManager:
                 logger.info(f"Found data directory at: {path.absolute()}")
                 return path
         
-        # If not found, create default at backend/data/raw
         default_path = Path(__file__).parent / 'raw'
         default_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created data directory at: {default_path.absolute()}")
@@ -60,29 +61,19 @@ class DataManager:
     def __init__(self, data_dir='backend/data/raw', timeframes=['15m', '1h']):
         """
         Initialize data manager
-        
-        Args:
-            data_dir: Directory to store raw data
-            timeframes: List of timeframes to manage
         """
-        # Auto-detect data directory
         self.data_dir = self._find_data_directory(data_dir)
-        
         self.timeframes = timeframes
         self.data_loader = CryptoDataLoader(
             use_binance_api=DATA_CONFIG['use_binance_api']
         )
         
-        # Metadata file for tracking data collection
         self.metadata_file = self.data_dir / 'metadata.json'
         self.metadata = self._load_metadata()
         
         logger.info(f"DataManager initialized with data directory: {self.data_dir}")
     
     def _load_metadata(self):
-        """
-        Load metadata about existing data
-        """
         if self.metadata_file.exists():
             try:
                 with open(self.metadata_file, 'r') as f:
@@ -93,9 +84,6 @@ class DataManager:
         return {}
     
     def _save_metadata(self):
-        """
-        Save metadata to file
-        """
         try:
             with open(self.metadata_file, 'w') as f:
                 json.dump(self.metadata, f, indent=2, default=str)
@@ -104,15 +92,11 @@ class DataManager:
             logger.error(f"Failed to save metadata: {str(e)}")
     
     def _get_file_path(self, symbol, timeframe):
-        """
-        Get file path for a cryptocurrency and timeframe
-        """
         return self.data_dir / f"{symbol}_{timeframe}.csv"
     
     def load_data(self, symbol, timeframe):
         """
         Load stored data for a symbol and timeframe as numpy array
-        Returns numpy array for compatibility with model training
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -137,7 +121,7 @@ class DataManager:
     def get_stored_data(self, symbol, timeframe):
         """
         Load stored data for a symbol and timeframe (returns DataFrame)
-        CRITICAL: Timestamp stays as integer milliseconds in index
+        Timestamp is stored as datetime string in CSV
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -148,12 +132,11 @@ class DataManager:
             return None
         
         try:
-            # Read CSV with timestamp as integer column
             df = pd.read_csv(file_path)
             
             if 'timestamp' in df.columns:
-                # Convert timestamp column to integer (keep as milliseconds)
-                df['timestamp'] = df['timestamp'].astype(int)
+                # Convert timestamp string back to datetime
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
                 # Set as index for consistency
                 df = df.set_index('timestamp')
                 logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe})")
@@ -169,6 +152,7 @@ class DataManager:
     def _append_new_data(self, symbol, timeframe, new_data, existing_data):
         """
         Append new data to existing data, avoiding duplicates
+        Works with datetime index
         """
         if existing_data is None or existing_data.empty:
             return new_data
@@ -187,57 +171,47 @@ class DataManager:
         """
         Save data to CSV file
         
-        CRITICAL: Handle both cases:
-        1. DataFrame with timestamp as index (as integers in milliseconds)
+        Handles both cases:
+        1. DataFrame with timestamp as datetime index
         2. DataFrame with timestamp as regular column
         """
         file_path = self._get_file_path(symbol, timeframe)
         
         try:
-            # Make a copy to avoid modifying original
             df_to_save = df.copy()
             
             # If timestamp is the index, reset it to be a column
             if df_to_save.index.name == 'timestamp':
                 df_to_save = df_to_save.reset_index()
-                # Ensure timestamp is integer (milliseconds)
-                df_to_save['timestamp'] = df_to_save['timestamp'].astype(int)
             
-            # Ensure timestamp column exists and is integer
+            # Ensure timestamp column exists
             if 'timestamp' not in df_to_save.columns:
-                logger.error(f"ERROR: No timestamp column found for {symbol} ({timeframe})")
+                logger.error(f"ERROR: No timestamp column found for {symbol} ({timeframe)}")
                 return
             
-            # Force timestamp to be integer (milliseconds)
-            df_to_save['timestamp'] = df_to_save['timestamp'].astype(int)
-            
-            # Save to CSV with timestamp as regular column
+            # Save to CSV (timestamp as datetime string)
             df_to_save.to_csv(file_path, index=False)
             logger.info(f"Saved {len(df_to_save)} rows for {symbol} ({timeframe}) to {file_path}")
             
             # Update metadata
             key = f"{symbol}_{timeframe}"
             
-            # Get min/max timestamps - READ FROM INTEGER VALUES, NOT DATETIME
+            # Get min/max timestamps from datetime objects
             ts_col = df_to_save['timestamp']
-            min_ts_ms = int(ts_col.min())
-            max_ts_ms = int(ts_col.max())
-            
-            # Convert milliseconds to datetime for display only
-            min_ts_dt = pd.to_datetime(min_ts_ms, unit='ms')
-            max_ts_dt = pd.to_datetime(max_ts_ms, unit='ms')
+            min_ts = pd.to_datetime(ts_col.min())
+            max_ts = pd.to_datetime(ts_col.max())
             
             self.metadata[key] = {
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'rows': len(df_to_save),
-                'last_timestamp': str(max_ts_dt),
-                'first_timestamp': str(min_ts_dt),
+                'first_timestamp': str(min_ts),
+                'last_timestamp': str(max_ts),
                 'last_updated': datetime.now().isoformat(),
             }
             self._save_metadata()
             
-            logger.debug(f"Metadata for {key}: first={min_ts_dt}, last={max_ts_dt}")
+            logger.debug(f"Metadata for {key}: first={min_ts}, last={max_ts}")
             
         except Exception as e:
             logger.error(f"Error saving data for {symbol} ({timeframe}): {str(e)}")
@@ -269,78 +243,43 @@ class DataManager:
     
     def fetch_and_store_batch(self, symbol, timeframe='1h', total_limit=3000, batch_delay=0.5):
         """
-        Fetch multiple batches to accumulate more candles
-        Makes multiple API calls to get more historical data
-        
-        CRITICAL FIX: Properly accumulate all batches
+        Fetch large batches using new batch method in data_loader
         
         Args:
             symbol: Cryptocurrency symbol
             timeframe: Timeframe (15m, 1h)
-            total_limit: Total candles to fetch (2000, 3000, 5000, etc.)
-            batch_delay: Delay between API calls (seconds) to avoid rate limit
+            total_limit: Total candles to fetch (3000, 5000, etc.)
+            batch_delay: Delay between API calls (seconds)
         
         Returns:
             Combined DataFrame with all accumulated data
         """
         logger.info(f"\n{'='*60}")
         logger.info(f"Batch fetching {symbol} ({timeframe})")
-        logger.info(f"Target: {total_limit} candles (batches of {self.MAX_PER_REQUEST})")
+        logger.info(f"Target: {total_limit} candles")
         logger.info(f"{'='*60}")
         
-        all_data = self.get_stored_data(symbol, timeframe)
+        # Use the new batch fetcher in data_loader
+        all_data = self.data_loader.fetch_ohlcv(symbol, timeframe, total_limit)
         
-        # Calculate how many batches needed
-        num_batches = (total_limit + self.MAX_PER_REQUEST - 1) // self.MAX_PER_REQUEST
-        
-        logger.info(f"Total batches needed: {num_batches}")
-        
-        for batch_num in range(num_batches):
-            logger.info(f"\n[Batch {batch_num + 1}/{num_batches}] Fetching {self.MAX_PER_REQUEST} candles...")
-            
-            try:
-                # Fetch this batch (fixed: always fetch MAX_PER_REQUEST)
-                batch_data = self.data_loader.fetch_ohlcv(
-                    symbol,
-                    timeframe=timeframe,
-                    limit=self.MAX_PER_REQUEST
-                )
-                
-                if batch_data is None or batch_data.empty:
-                    logger.warning(f"Batch {batch_num + 1} returned no data - stopping")
-                    break
-                
-                logger.info(f"Fetched {len(batch_data)} rows in batch {batch_num + 1}")
-                
-                # Set timestamp as index
-                if 'timestamp' in batch_data.columns:
-                    batch_data = batch_data.set_index('timestamp')
-                
-                # Append to accumulated data
-                if all_data is None or all_data.empty:
-                    all_data = batch_data
-                    logger.info(f"First batch: {len(all_data)} rows total")
-                else:
-                    all_data = self._append_new_data(symbol, timeframe, batch_data, all_data)
-                    logger.info(f"After batch {batch_num + 1}: {len(all_data)} rows total")
-                
-                # Delay before next batch to avoid rate limiting
-                if batch_num < num_batches - 1:
-                    logger.info(f"Waiting {batch_delay}s before next batch...")
-                    time.sleep(batch_delay)
-            
-            except Exception as e:
-                logger.error(f"Error in batch {batch_num + 1}: {str(e)}")
-                break
-        
-        # Save final accumulated data
-        if all_data is not None and not all_data.empty:
-            self.save_data(symbol, timeframe, all_data)
-            logger.info(f"\nCompleted: {len(all_data)} total rows saved for {symbol} ({timeframe})")
-            return all_data
-        else:
+        if all_data is None or all_data.empty:
             logger.warning(f"No data accumulated for {symbol} ({timeframe})")
             return None
+        
+        # Set timestamp as index
+        if 'timestamp' in all_data.columns:
+            all_data = all_data.set_index('timestamp')
+        
+        # Merge with existing stored data if any
+        existing_data = self.get_stored_data(symbol, timeframe)
+        if existing_data is not None and not existing_data.empty:
+            all_data = self._append_new_data(symbol, timeframe, all_data, existing_data)
+        
+        # Save final accumulated data
+        self.save_data(symbol, timeframe, all_data)
+        logger.info(f"\nCompleted: {len(all_data)} total rows saved for {symbol} ({timeframe})")
+        
+        return all_data
     
     def fetch_and_store_all(self, timeframes=None, limit=1000):
         """
@@ -365,7 +304,7 @@ class DataManager:
                         symbol_results[timeframe] = {
                             'status': 'Success',
                             'rows': len(df),
-                            'date_range': f"{pd.to_datetime(df.index.min(), unit='ms').date()} to {pd.to_datetime(df.index.max(), unit='ms').date()}"
+                            'date_range': f"{df.index.min().date()} to {df.index.max().date()}"
                         }
                     else:
                         symbol_results[timeframe] = {
@@ -403,11 +342,11 @@ class DataManager:
     
     def fetch_and_store_all_batch(self, timeframes=None, total_limit=3000, batch_delay=0.5):
         """
-        Batch fetch for all cryptocurrencies to accumulate more candles
+        Batch fetch for all cryptocurrencies
         
         Args:
             timeframes: List of timeframes
-            total_limit: Total candles per coin per timeframe (2000, 3000, 5000, etc.)
+            total_limit: Total candles per coin per timeframe (3000, 5000, etc.)
             batch_delay: Delay between batches (seconds)
         """
         if timeframes is None:
@@ -419,8 +358,6 @@ class DataManager:
         logger.info(f"Cryptocurrencies: {len(CRYPTOCURRENCIES)}")
         logger.info(f"Timeframes: {timeframes}")
         logger.info(f"Target per coin: {total_limit} candles")
-        logger.info(f"Batch size: {self.MAX_PER_REQUEST} candles per API call")
-        logger.info(f"API call delay: {batch_delay}s")
         logger.info(f"{'='*70}")
         
         results = {}
@@ -447,7 +384,7 @@ class DataManager:
                         symbol_results[timeframe] = {
                             'status': 'Success',
                             'rows': len(df),
-                            'date_range': f"{pd.to_datetime(df.index.min(), unit='ms').date()} to {pd.to_datetime(df.index.max(), unit='ms').date()}"
+                            'date_range': f"{df.index.min().date()} to {df.index.max().date()}"
                         }
                     else:
                         symbol_results[timeframe] = {
@@ -502,7 +439,7 @@ class DataManager:
             try:
                 df = pd.read_csv(csv_file)
                 if 'timestamp' in df.columns:
-                    df['timestamp'] = df['timestamp'].astype(int)
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df = df.set_index('timestamp')
                 
                 parts = csv_file.stem.split('_')
@@ -514,9 +451,8 @@ class DataManager:
                     if symbol not in stats['symbols']:
                         stats['symbols'][symbol] = {}
                     
-                    # Convert millisecond timestamps to datetime for display
-                    min_ts = pd.to_datetime(df.index.min(), unit='ms')
-                    max_ts = pd.to_datetime(df.index.max(), unit='ms')
+                    min_ts = df.index.min()
+                    max_ts = df.index.max()
                     
                     stats['symbols'][symbol][timeframe] = {
                         'rows': len(df),

@@ -137,7 +137,7 @@ class DataManager:
     def get_stored_data(self, symbol, timeframe):
         """
         Load stored data for a symbol and timeframe (returns DataFrame)
-        FIXED: Now properly handles timestamps from Binance API (milliseconds)
+        CRITICAL: Timestamp stays as integer milliseconds in index
         """
         file_path = self._get_file_path(symbol, timeframe)
         
@@ -153,15 +153,15 @@ class DataManager:
             return None
         
         try:
-            # Read CSV with timestamp as regular column first
+            # Read CSV with timestamp as integer column
             df = pd.read_csv(file_path)
             
             if 'timestamp' in df.columns:
-                # CRITICAL FIX: Convert timestamp column to datetime using unit='ms'
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                # Convert timestamp column to integer (keep as milliseconds)
+                df['timestamp'] = df['timestamp'].astype(int)
                 # Set as index for consistency
                 df = df.set_index('timestamp')
-                logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe}) with proper timestamp conversion")
+                logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe})")
             else:
                 logger.warning(f"No timestamp column found in {file_path}")
             
@@ -193,7 +193,7 @@ class DataManager:
         Save data to CSV file
         
         CRITICAL: Handle both cases:
-        1. DataFrame with timestamp as index
+        1. DataFrame with timestamp as index (as integers in milliseconds)
         2. DataFrame with timestamp as regular column
         """
         file_path = self._get_file_path(symbol, timeframe)
@@ -205,43 +205,44 @@ class DataManager:
             # If timestamp is the index, reset it to be a column
             if df_to_save.index.name == 'timestamp':
                 df_to_save = df_to_save.reset_index()
+                # Ensure timestamp is integer (milliseconds)
+                df_to_save['timestamp'] = df_to_save['timestamp'].astype(int)
             
-            # Ensure timestamp column exists and contains proper data
+            # Ensure timestamp column exists and is integer
             if 'timestamp' not in df_to_save.columns:
                 logger.error(f"ERROR: No timestamp column found for {symbol} ({timeframe})")
                 return
             
-            # Convert timestamp to milliseconds (integer) for storage
-            # so it doesn't get corrupted when reading back
-            if pd.api.types.is_datetime64_any_dtype(df_to_save['timestamp']):
-                # If it's a datetime, convert to milliseconds since epoch
-                df_to_save['timestamp'] = (df_to_save['timestamp'].astype(np.int64) // 10**6).astype(int)
+            # Force timestamp to be integer (milliseconds)
+            df_to_save['timestamp'] = df_to_save['timestamp'].astype(int)
             
-            # Save to CSV
+            # Save to CSV with timestamp as regular column
             df_to_save.to_csv(file_path, index=False)
             logger.info(f"Saved {len(df_to_save)} rows for {symbol} ({timeframe}) to {file_path}")
             
             # Update metadata
             key = f"{symbol}_{timeframe}"
             
-            # Get min/max timestamps for metadata
-            if 'timestamp' in df_to_save.columns:
-                # Timestamps are in milliseconds, convert back to datetime for display
-                min_ts = pd.to_datetime(df_to_save['timestamp'].min(), unit='ms')
-                max_ts = pd.to_datetime(df_to_save['timestamp'].max(), unit='ms')
-            else:
-                min_ts = "unknown"
-                max_ts = "unknown"
+            # Get min/max timestamps - READ FROM INTEGER VALUES, NOT DATETIME
+            ts_col = df_to_save['timestamp']
+            min_ts_ms = int(ts_col.min())
+            max_ts_ms = int(ts_col.max())
+            
+            # Convert milliseconds to datetime for display only
+            min_ts_dt = pd.to_datetime(min_ts_ms, unit='ms')
+            max_ts_dt = pd.to_datetime(max_ts_ms, unit='ms')
             
             self.metadata[key] = {
                 'symbol': symbol,
                 'timeframe': timeframe,
                 'rows': len(df_to_save),
-                'last_timestamp': str(max_ts),
-                'first_timestamp': str(min_ts),
+                'last_timestamp': str(max_ts_dt),
+                'first_timestamp': str(min_ts_dt),
                 'last_updated': datetime.now().isoformat(),
             }
             self._save_metadata()
+            
+            logger.debug(f"Metadata for {key}: first={min_ts_dt}, last={max_ts_dt}")
             
         except Exception as e:
             logger.error(f"Error saving data for {symbol} ({timeframe}): {str(e)}")
@@ -257,6 +258,10 @@ class DataManager:
         if new_data is None or new_data.empty:
             logger.warning(f"Failed to fetch data for {symbol} ({timeframe})")
             return self.get_stored_data(symbol, timeframe)
+        
+        # Set timestamp as index for consistency
+        if 'timestamp' in new_data.columns:
+            new_data = new_data.set_index('timestamp')
         
         if append:
             existing_data = self.get_stored_data(symbol, timeframe)
@@ -305,6 +310,10 @@ class DataManager:
                 if batch_data is None or batch_data.empty:
                     logger.warning(f"Batch {batch_num + 1} returned no data")
                     break
+                
+                # Set timestamp as index
+                if 'timestamp' in batch_data.columns:
+                    batch_data = batch_data.set_index('timestamp')
                 
                 logger.info(f"Fetched {len(batch_data)} rows in batch {batch_num + 1}")
                 
@@ -355,7 +364,7 @@ class DataManager:
                         symbol_results[timeframe] = {
                             'status': 'Success',
                             'rows': len(df),
-                            'date_range': f"{df.index[0].date()} to {df.index[-1].date()}"
+                            'date_range': f"{pd.to_datetime(df.index.min(), unit='ms').date()} to {pd.to_datetime(df.index.max(), unit='ms').date()}"
                         }
                     else:
                         symbol_results[timeframe] = {
@@ -437,7 +446,7 @@ class DataManager:
                         symbol_results[timeframe] = {
                             'status': 'Success',
                             'rows': len(df),
-                            'date_range': f"{df.index[0].date()} to {df.index[-1].date()}"
+                            'date_range': f"{pd.to_datetime(df.index.min(), unit='ms').date()} to {pd.to_datetime(df.index.max(), unit='ms').date()}"
                         }
                     else:
                         symbol_results[timeframe] = {
@@ -492,7 +501,7 @@ class DataManager:
             try:
                 df = pd.read_csv(csv_file)
                 if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df['timestamp'] = df['timestamp'].astype(int)
                     df = df.set_index('timestamp')
                 
                 parts = csv_file.stem.split('_')
@@ -504,11 +513,15 @@ class DataManager:
                     if symbol not in stats['symbols']:
                         stats['symbols'][symbol] = {}
                     
+                    # Convert millisecond timestamps to datetime for display
+                    min_ts = pd.to_datetime(df.index.min(), unit='ms')
+                    max_ts = pd.to_datetime(df.index.max(), unit='ms')
+                    
                     stats['symbols'][symbol][timeframe] = {
                         'rows': len(df),
                         'date_range': {
-                            'start': str(df.index[0].date()),
-                            'end': str(df.index[-1].date())
+                            'start': str(min_ts.date()),
+                            'end': str(max_ts.date())
                         }
                     }
                     

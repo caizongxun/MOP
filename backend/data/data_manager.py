@@ -153,27 +153,23 @@ class DataManager:
             return None
         
         try:
-            # Try reading with timestamp index
-            df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
-            logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe}) from {file_path}")
+            # Read CSV with timestamp as regular column first
+            df = pd.read_csv(file_path)
+            
+            if 'timestamp' in df.columns:
+                # CRITICAL FIX: Convert timestamp column to datetime using unit='ms'
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                # Set as index for consistency
+                df = df.set_index('timestamp')
+                logger.info(f"Loaded {len(df)} rows for {symbol} ({timeframe}) with proper timestamp conversion")
+            else:
+                logger.warning(f"No timestamp column found in {file_path}")
+            
             return df
+            
         except Exception as e:
             logger.error(f"Error loading data for {symbol} ({timeframe}): {str(e)}")
-            # Try reading without index and convert timestamp properly
-            try:
-                df = pd.read_csv(file_path)
-                if 'timestamp' in df.columns:
-                    # CRITICAL FIX: Binance API returns timestamps in milliseconds (unit='ms')
-                    # Do NOT use unit='s' as that would divide by 1000 and result in 1970 dates
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    df = df.set_index('timestamp')
-                    logger.info(f"Loaded {len(df)} rows (with ms conversion) for {symbol} ({timeframe})")
-                else:
-                    logger.warning(f"No timestamp column found in {file_path}")
-                return df
-            except Exception as e2:
-                logger.error(f"Failed to load data even with ms conversion: {str(e2)}")
-                return None
+            return None
     
     def _append_new_data(self, symbol, timeframe, new_data, existing_data):
         """
@@ -195,21 +191,54 @@ class DataManager:
     def save_data(self, symbol, timeframe, df):
         """
         Save data to CSV file
+        
+        CRITICAL: Handle both cases:
+        1. DataFrame with timestamp as index
+        2. DataFrame with timestamp as regular column
         """
         file_path = self._get_file_path(symbol, timeframe)
         
         try:
-            df.to_csv(file_path)
-            logger.info(f"Saved {len(df)} rows for {symbol} ({timeframe}) to {file_path}")
+            # Make a copy to avoid modifying original
+            df_to_save = df.copy()
+            
+            # If timestamp is the index, reset it to be a column
+            if df_to_save.index.name == 'timestamp':
+                df_to_save = df_to_save.reset_index()
+            
+            # Ensure timestamp column exists and contains proper data
+            if 'timestamp' not in df_to_save.columns:
+                logger.error(f"ERROR: No timestamp column found for {symbol} ({timeframe})")
+                return
+            
+            # Convert timestamp to milliseconds (integer) for storage
+            # so it doesn't get corrupted when reading back
+            if pd.api.types.is_datetime64_any_dtype(df_to_save['timestamp']):
+                # If it's a datetime, convert to milliseconds since epoch
+                df_to_save['timestamp'] = (df_to_save['timestamp'].astype(np.int64) // 10**6).astype(int)
+            
+            # Save to CSV
+            df_to_save.to_csv(file_path, index=False)
+            logger.info(f"Saved {len(df_to_save)} rows for {symbol} ({timeframe}) to {file_path}")
             
             # Update metadata
             key = f"{symbol}_{timeframe}"
+            
+            # Get min/max timestamps for metadata
+            if 'timestamp' in df_to_save.columns:
+                # Timestamps are in milliseconds, convert back to datetime for display
+                min_ts = pd.to_datetime(df_to_save['timestamp'].min(), unit='ms')
+                max_ts = pd.to_datetime(df_to_save['timestamp'].max(), unit='ms')
+            else:
+                min_ts = "unknown"
+                max_ts = "unknown"
+            
             self.metadata[key] = {
                 'symbol': symbol,
                 'timeframe': timeframe,
-                'rows': len(df),
-                'last_timestamp': str(df.index[-1]),
-                'first_timestamp': str(df.index[0]),
+                'rows': len(df_to_save),
+                'last_timestamp': str(max_ts),
+                'first_timestamp': str(min_ts),
                 'last_updated': datetime.now().isoformat(),
             }
             self._save_metadata()
@@ -461,7 +490,11 @@ class DataManager:
                 continue
             
             try:
-                df = pd.read_csv(csv_file, index_col='timestamp', parse_dates=True)
+                df = pd.read_csv(csv_file)
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df = df.set_index('timestamp')
+                
                 parts = csv_file.stem.split('_')
                 
                 if len(parts) >= 2:
